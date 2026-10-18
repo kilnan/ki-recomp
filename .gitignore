@@ -1,0 +1,12 @@
+# Original game data: never commit (ROM, CHD, dumps derived from them)
+/data/
+/traces/
+# Third-party source checkouts used as reference only
+/third_party_src/
+/build*/
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+# Reports containing original game code or its translation stay local
+/poc/out/

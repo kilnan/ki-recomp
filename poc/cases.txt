@@ -1,0 +1,40 @@
+# PoC capture cases (KI 1, U98 L1.5D). Format:
+#   name  function  hit  [capture options...]
+# A case stops at the hit-th call of the function that satisfies --when
+# (a MAME debugger expression; the caller's return address identifies the
+# call site). Plain hit indices are not stable across MAME runs: the game's
+# disk write/verify loop does not repeat the same number of times.
+# "real" cases capture a call made by the game itself during boot.
+# "-interp" cases repeat a real case with MAME's MIPS3 interpreter instead
+# of its DRC (two independent MAME CPU back ends).
+# "syn" cases (always run with the interpreter, see tools/mame_capture.py)
+# stop at a real call and overwrite inputs first; the original
+# code still runs inside MAME, but the inputs are synthetic.
+real-ec44-1           8802d560   1  --when ra==ffffffff8802ec44
+real-ec44-2           8802d560   2  --when ra==ffffffff8802ec44
+real-ecec-1           8802d560   1  --when ra==ffffffff8802ecec
+real-ecec-3           8802d560   3  --when ra==ffffffff8802ecec
+real-ed20-1           8802d560   1  --when ra==ffffffff8802ed20
+real-ed20-2           8802d560   2  --when ra==ffffffff8802ed20
+real-f104-1           8802d560   1  --when ra==ffffffff8802f104
+real-f138-1           8802d560   1  --when ra==ffffffff8802f138
+real-ecec-3-interp    8802d560   3  --when ra==ffffffff8802ecec
+real-ed20-1-interp    8802d560   1  --when ra==ffffffff8802ed20
+real-f138-1-interp    8802d560   1  --when ra==ffffffff8802f138
+syn-len1              8802d560   1  --when ra==ffffffff8802ec44 --set a1=1
+syn-random4093        8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/random4093.bin@88600000 --set a0=ffffffff88600000 --set a1=ffd
+syn-ones777-odd       8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/ones777.bin@88600003 --set a0=ffffffff88600003 --set a1=309
+syn-sram-src          8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/random4093.bin@80070000 --set a0=ffffffff80070001 --set a1=200
+
+# 0x8802d774: compiled C with a stack frame (stores), reads the table at
+# 0x88040e60 (rom-1). The game only calls it with a0=2 during boot, so the
+# a0==1 path is covered by synthetic cases only.
+d774-real-eba0-1      8802d774   1  --when ra==ffffffff8802eba0
+d774-real-eba0-3      8802d774   3  --when ra==ffffffff8802eba0
+d774-real-f03c-4      8802d774   4  --when ra==ffffffff8802f03c
+d774-real-f03c-7      8802d774   7  --when ra==ffffffff8802f03c
+syn-d774-a0eq1        8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e60 --set a0=1 --set a1=0 --set a2=20
+syn-d774-a0eq2        8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e60 --set a1=0 --set a2=40
+syn-d774-a0eq1-neg    8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e50 --set a0=1 --set a1=fffffffffffffffd --set a2=5
+syn-d774-bigsum       8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/ones777.bin@88040e60 --set a1=0 --set a2=300
+syn-d774-empty        8802d774   1  --when ra==ffffffff8802eba0 --set a1=5 --set a2=5
