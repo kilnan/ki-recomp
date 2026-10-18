@@ -165,9 +165,101 @@ void ctc1(Context& c, unsigned reg, uint64_t value) {
     if (reg == 31) c.fcsr = lo32(value);
 }
 
-uint64_t mfc0(Context& c, unsigned reg, uint32_t pc) { raise_fault(c, Fault::Unimplemented, pc, reg); }
-void mtc0(Context& c, unsigned reg, uint64_t, uint32_t pc) { raise_fault(c, Fault::Unimplemented, pc, reg); }
-void cop0_op(Context& c, uint32_t instr, uint32_t pc) { raise_fault(c, Fault::Unimplemented, pc, instr); }
+// ---- COP0, timer and interrupts --------------------------------------------
+// Count runs at half the CPU clock. The timer interrupt (Cause.IP7) is raised
+// when Count reaches Compare and cleared by writing Compare. Board lines
+// (Int0 = VBLANK, Int1 = IDE on this board) come from the IoHandler.
+
+static uint32_t count_now(const Context& c) { return static_cast<uint32_t>(c.count_base + c.cycles / 2); }
+
+static uint32_t cause_now(Context& c) {
+    uint32_t cause = lo32(c.cp0[kCp0Cause]) & ~0x7c00u;
+    if (c.io) cause |= c.io->interrupt_lines(c) & 0x7c00u;
+    return cause;
+}
+
+void schedule(Context& c) {
+    // Cycles until Count == Compare (mod 2^32), at Count's half rate.
+    uint32_t delta = lo32(c.cp0[kCp0Compare]) - count_now(c);
+    uint64_t timer = c.cycles + (delta == 0 ? (1ull << 33) : 2ull * delta);
+    uint64_t board = c.io ? c.io->next_event(c) : ~0ull;
+    c.next_event = timer < board ? timer : board;
+    if (c.cp0[kCp0Cause] & 0x8000) {
+        // Timer already pending: if it can be taken, come back immediately.
+        uint32_t sr = lo32(c.cp0[kCp0Status]);
+        if ((sr & 1) && !(sr & 6) && (sr & 0x8000)) c.next_event = c.cycles;
+    }
+}
+
+static void take_interrupt(Context& c, uint32_t pc) {
+    uint32_t sr = lo32(c.cp0[kCp0Status]);
+    c.cp0[kCp0Epc] = sx32(pc);  // approximate: the safe point, not the exact instruction
+    c.cp0[kCp0Cause] = (c.cp0[kCp0Cause] & ~0x7cull);  // ExcCode 0 = interrupt
+    c.cp0[kCp0Status] = sx32(sr | 2);                 // EXL
+    // The SRAM vector stub: save sp in the zero page, enter the handler.
+    store<uint64_t>(c, 0x1f0u, c.r[29], pc);
+    c.r[29] = sx32(kExceptionHandler);
+    if (RecompFunc fn = lookup_function(kExceptionHandler)) fn(c);
+    else raise_fault(c, Fault::Unimplemented, pc, kExceptionHandler);
+}
+
+void service(Context& c, uint32_t pc) {
+    if (c.io && c.cycles >= c.io->next_event(c)) c.io->update(c);
+    // Timer: did Count become equal to Compare since the last check?
+    uint32_t now = count_now(c), elapsed = now - c.last_count;
+    if (elapsed && lo32(c.cp0[kCp0Compare]) - c.last_count - 1 < elapsed) c.cp0[kCp0Cause] |= 0x8000;  // IP7
+    c.last_count = now;
+    uint32_t sr = lo32(c.cp0[kCp0Status]);
+    uint32_t pending = cause_now(c) & sr & 0xff00u;
+    if ((sr & 1) && !(sr & 6) && pending) take_interrupt(c, pc);
+    schedule(c);
+}
+
+void eret(Context& c) {
+    c.cp0[kCp0Status] &= ~2ull;  // clear EXL; control returns to the interrupted code
+    schedule(c);
+}
+
+uint64_t mfc0(Context& c, unsigned reg, uint32_t) {
+    switch (reg) {
+        case kCp0Count: return count_now(c);
+        case kCp0Cause: return cause_now(c);
+        case kCp0PRId: return 0x2020;  // R4600 in MAME
+        default: return c.cp0[reg & 31];
+    }
+}
+
+void mtc0(Context& c, unsigned reg, uint64_t value, uint32_t) {
+    switch (reg) {
+        case kCp0Count:
+            c.count_base = static_cast<uint32_t>(lo32(value) - static_cast<uint32_t>(c.cycles / 2));
+            c.last_count = count_now(c);
+            break;
+        case kCp0Compare:
+            c.cp0[kCp0Compare] = lo32(value);
+            c.cp0[kCp0Cause] &= ~0x8000ull;
+            c.last_count = count_now(c);
+            break;
+        case kCp0Cause: c.cp0[kCp0Cause] = (c.cp0[kCp0Cause] & ~0x300ull) | (value & 0x300); break;  // IP0-1 only
+        default: c.cp0[reg & 31] = value; break;
+    }
+    schedule(c);
+}
+
+void cop0_op(Context& c, uint32_t instr, uint32_t pc) {
+    switch (instr & 0x3f) {
+        case 0x02: {  // TLBWI: only the zero-page mapping is modelled; accept invalid entries
+            uint64_t lo0 = c.cp0[kCp0EntryLo0], lo1 = c.cp0[kCp0EntryLo1], hi = c.cp0[kCp0EntryHi];
+            bool invalid = !(lo0 & 2) && !(lo1 & 2);
+            bool zero_page = (hi & ~0x1fffull) == 0 && ((lo0 >> 6) << 12) == kZeroPagePhys && (lo0 & 2) && !(lo1 & 2) &&
+                             (c.cp0[kCp0PageMask] == 0);
+            if (!invalid && !zero_page) raise_fault(c, Fault::Tlb, pc, lo32(hi));
+            break;
+        }
+        case 0x01: case 0x06: case 0x08: break;  // TLBR, TLBWR, TLBP: not used by the game in normal play
+        default: raise_fault(c, Fault::Unimplemented, pc, instr);
+    }
+}
 void cache_op(Context&, unsigned, uint32_t, uint32_t) {}  // caches are not modelled; RAM is coherent
 
 }  // namespace ki

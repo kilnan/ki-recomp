@@ -22,7 +22,7 @@ else()
   add_compile_options(-Wall -Wextra -Wno-unused-label)
 endif()
 
-add_library(ki_runtime STATIC runtime/src/runtime.cpp)
+add_library(ki_runtime STATIC runtime/src/runtime.cpp runtime/src/kinst_board.cpp)
 target_include_directories(ki_runtime PUBLIC runtime/include)
 
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
@@ -42,7 +42,7 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory "${GEN_DIR}"
   COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
           --image "${KI_CODE_IMAGE}" --vram 88000000 --expect-sha1 ${KI_CODE_IMAGE_SHA1}
-          ${func_args} --out "${GEN_SRC}" --listing "${GEN_DIR}/recompiled.lst"
+          ${func_args} --no-timing --out "${GEN_SRC}" --listing "${GEN_DIR}/recompiled.lst"
   DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_CODE_IMAGE}" ${data_deps}
   COMMENT "Recompiling guest functions: ${KI_FUNCTIONS}"
   VERBATIM)
@@ -66,3 +66,41 @@ foreach(case_dir IN LISTS _cases)
     add_test(NAME "poc_${case_name}" COMMAND compare_case "${case_dir}")
   endif()
 endforeach()
+
+# ---- whole program -------------------------------------------------------------
+# Every entry point the translator can find (jal targets, code pointers in the
+# data images) plus the entry and the exception handler, split into
+# KI_SPLIT units so they compile in parallel. With cycle accounting and
+# interrupt polling, for running on the board model.
+option(KI_BUILD_FULL "build the whole-program executable ki_run" ON)
+if(KI_BUILD_FULL)
+  set(KI_SPLIT 16 CACHE STRING "number of generated translation units for the whole program")
+  set(FULL_DIR "${CMAKE_BINARY_DIR}/gen_full")
+  set(full_srcs "${FULL_DIR}/recompiled_table.cpp")
+  math(EXPR last "${KI_SPLIT} - 1")
+  foreach(k RANGE ${last})
+    list(APPEND full_srcs "${FULL_DIR}/recompiled_${k}.cpp")
+  endforeach()
+  set(data_args "")
+  foreach(d IN LISTS KI_DATA_IMAGES)
+    list(APPEND data_args --data ${d})
+  endforeach()
+  add_custom_command(
+    OUTPUT ${full_srcs} "${FULL_DIR}/recompiled.h"
+    COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
+            --image "${KI_CODE_IMAGE}" --vram 88000000 --expect-sha1 ${KI_CODE_IMAGE_SHA1} ${data_args}
+            --func 88000000 --func 880266c8 --discover --discover-pointers
+            --out-dir "${FULL_DIR}" --split ${KI_SPLIT}
+    DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_CODE_IMAGE}" ${data_deps}
+    COMMENT "Recompiling the whole program"
+    VERBATIM)
+  add_library(ki_full_code STATIC ${full_srcs})
+  target_include_directories(ki_full_code PRIVATE "${FULL_DIR}")
+  target_link_libraries(ki_full_code PUBLIC ki_runtime)
+  # The huge dispatch functions make -O2 very slow to compile; -O1 is enough for now.
+  if(NOT MSVC)
+    target_compile_options(ki_full_code PRIVATE -O1 -Wno-unused-parameter)
+  endif()
+  add_executable(ki_run src/ki_run.cpp)
+  target_link_libraries(ki_run PRIVATE ki_full_code)
+endif()

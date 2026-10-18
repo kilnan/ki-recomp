@@ -24,6 +24,7 @@ the instruction; operand fields are taken directly from the instruction word.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import hashlib
 import struct
 import sys
@@ -213,6 +214,8 @@ def find_function_end(img: Image, start: int, limit: int = 0x40000, stops: froze
                 furthest = max(furthest, t)
             elif pc >= furthest:
                 return pc + 8  # tail call
+        elif i.name == "eret" and pc >= furthest:
+            return pc + 4
         elif i.name == "jr":
             if i.rs != 31:
                 # Case targets lie before the next known function entry.
@@ -245,10 +248,12 @@ class Function:
 
 
 class Translator:
-    def __init__(self, img: Image, allow_unimplemented: bool):
+    def __init__(self, img: Image, allow_unimplemented: bool, timing: bool = True):
         self.img = img
         self.allow_unimplemented = allow_unimplemented
+        self.timing = timing
         self.known: set[int] = set()
+        self.missing: set[int] = set()  # direct transfers to addresses that are not entries yet
 
     # -- straight-line instructions ---------------------------------------
     def assign(self, reg: int, expr: str) -> str:
@@ -361,7 +366,9 @@ class Translator:
             return a(i.rt, conv.format(f"ki::mfc0(c, {i.rd}, {pc})"))
         if n in ("mtc0", "dmtc0"):
             return f"ki::mtc0(c, {i.rd}, {rt}, {pc});"
-        if n in ("tlbr", "tlbwi", "tlbwr", "tlbp", "eret"):
+        if n == "eret":
+            return "ki::eret(c); return;"
+        if n in ("tlbr", "tlbwi", "tlbwr", "tlbp"):
             return f"ki::cop0_op(c, {u32(i.word)}, {pc});"
         fpu = self.fpu(i, addr, pc)
         if fpu is not None:
@@ -413,6 +420,8 @@ class Translator:
                 "bltz": f"ki::s64({rs}) < 0", "bgez": f"ki::s64({rs}) >= 0"}[base]
 
     def call(self, target: int, pc: int) -> str:
+        if target not in self.known and self.img.contains(target):
+            self.missing.add(target)
         if target in self.known:
             return f"func_{target:08x}(c);"
         return f"ki::call_indirect(c, {u32(target)}, {u32(pc)});"
@@ -438,6 +447,16 @@ class Translator:
         # unrolled loops, continuations in registers) may land on any
         # instruction of the function, so every instruction gets a label and
         # the jump dispatches over all of them.
+        # Calls to an address inside this function (the dispatcher at 0x88002038
+        # is jal'ed from the main loop it jumps back into) become "set $ra;
+        # goto", and `jr $ra` dispatches over those return sites, falling back
+        # to a C++ return for the external caller. The guest's own stack in
+        # memory then carries the nesting, so the host stack stays flat.
+        local_calls = [i for i in insns if i.name == "jal" and i.jump_target in addrs]
+        return_sites = sorted({i.vaddr + 8 for i in local_calls if i.vaddr + 8 in addrs})
+        for i in local_calls:
+            targets.add(i.jump_target)
+        targets.update(return_sites)
         unresolved = [i for i in insns if i.name == "jr" and i.rs != 31 and i.vaddr not in tables]
         if unresolved:
             targets.update(addrs)
@@ -454,24 +473,56 @@ class Translator:
         out = [f"void func_{fn.start:08x}(ki::Context& c) {{",
                f"    // guest 0x{fn.start:08x}-0x{fn.end:08x} ({len(insns)} instructions)",
                "    bool br = false;", "    (void)br;", "    (void)c;"]
+        uses_entry_ra = any(i.name == "jr" and i.rs != 31 for i in insns)
+        if uses_entry_ra:
+            # Return address the caller passed in $ra: hand-written code also
+            # returns through other registers (e.g. `move a1,ra ... jr a1`).
+            out.append("    const uint32_t entry_ra = ki::lo32(c.r[31]);")
 
         def emit(line: str, i: Insn | None = None):
             cmt = f"  // {i.vaddr:08x}: {i.word:08x}  {i.text}" if i else ""
             out.append(f"    {line}{cmt}")
+
+        # Timing: every executed guest instruction adds one cycle to c.cycles
+        # (R4600 at ~1 instruction per cycle; stalls and caches are ignored).
+        # Counts are flushed before every label and control transfer, so each
+        # path is charged exactly the instructions it executes.
+        pending = [0]
+
+        def flush():
+            if self.timing and pending[0]:
+                emit(f"c.cycles += {pending[0]};")
+            pending[0] = 0
+
+        def label(name: str):
+            flush()
+            out.append(f"{name}:" if not name.endswith("_skip") else f"{name}: ;")
+
+        def go_to(t: int, pc: int) -> str:
+            # Backward jumps are safe points for interrupts and timed events.
+            poll = f"ki::poll(c, {u32(pc)}); " if self.timing and t <= pc else ""
+            return f"{{ {poll}goto L_{t:08x}; }}" if poll else f"goto L_{t:08x};"
 
         def fall_through(next_addr: int, next_idx: int, pc: int):
             # Control reaches next_addr sequentially; if that is not the next
             # emitted instruction, continue in the function that starts there
             # (shared tails, functions that do not return).
             if next_idx >= len(insns) or insns[next_idx].vaddr != next_addr:
+                flush()
                 emit(f"{self.call(next_addr, pc)} return;  // fall through to 0x{next_addr:08x}")
+
+        if self.timing:
+            emit(f"ki::poll(c, {u32(fn.start)});")
 
         idx = 0
         while idx < len(insns):
             i = insns[idx]
             if i.vaddr in targets:
-                out.append(f"L_{i.vaddr:08x}:")
+                label(f"L_{i.vaddr:08x}")
             if not has_delay_slot(i):
+                pending[0] += 1
+                if i.name == "eret":
+                    flush()
                 emit(self.simple(i), i)
                 idx += 1
                 fall_through(i.vaddr + 4, idx, i.vaddr)
@@ -490,7 +541,9 @@ class Translator:
                 if i.name not in plain or d.name not in plain:
                     raise TranslateError(f"{d.vaddr:08x}: control transfer in delay slot")
                 t = i.branch_target
-                go = f"goto L_{t:08x};" if t in addrs else f"{{ {self.call(t, i.vaddr)} return; }}"
+                pending[0] += 2
+                flush()
+                go = go_to(t, i.vaddr) if t in addrs else f"{{ {self.call(t, i.vaddr)} return; }}"
                 emit(f"br = {self.branch_cond(i)};", i)
                 emit(f"if (br) {{ if ({self.branch_cond(d)}) ki::raise_fault(c, ki::Fault::Unimplemented, "
                      f"{u32(d.vaddr)}); {go} }}")
@@ -498,9 +551,11 @@ class Translator:
                 continue
             ret = u32(i.vaddr + 8)
             dslot = lambda: emit("    " + self.simple(d), d)  # noqa: E731
+            pending[0] += 2
+            flush()
             if i.name in CONDITIONAL_BRANCHES:
                 t = i.branch_target
-                go = f"goto L_{t:08x};" if t in addrs else f"{{ {self.call(t, i.vaddr)} return; }}"
+                go = go_to(t, i.vaddr) if t in addrs else f"{{ {self.call(t, i.vaddr)} return; }}"
                 link = i.name in ("bltzal", "bgezal", "bltzall", "bgezall")
                 emit(f"br = {self.branch_cond(i)};", i)
                 if link:
@@ -518,16 +573,28 @@ class Translator:
                 emit(f"// j 0x{t:08x}", i)
                 dslot()
                 if t in addrs:
-                    emit(f"goto L_{t:08x};")
+                    emit(go_to(t, i.vaddr))
                 else:
                     emit(f"{self.call(t, i.vaddr)} return;  // tail call")
             elif i.name == "jal":
                 t = i.jump_target
                 emit(f"c.r[31] = ki::sx32({ret});", i)
                 dslot()
-                emit(self.call(t, i.vaddr))
+                if t in addrs:
+                    emit(f"{{ ki::poll(c, {u32(i.vaddr)}); goto L_{t:08x}; }}  // call inside this function"
+                         if self.timing else f"goto L_{t:08x};  // call inside this function")
+                else:
+                    emit(self.call(t, i.vaddr))
             elif i.name == "jr":
-                if i.rs == 31:
+                if i.rs == 31 and return_sites:
+                    emit(f"{{ uint32_t tgt = ki::lo32(c.r[31]);  // jr $ra, local return sites", i)
+                    dslot()
+                    emit("  switch (tgt) {")
+                    for t in return_sites:
+                        emit(f"    case {u32(t)}: goto L_{t:08x};")
+                    emit("    default: return;  // the external caller (as for any `jr $ra`)")
+                    emit("  } }")
+                elif i.rs == 31:
                     # Assumes $ra still holds the caller's return address, as
                     # N64Recomp does; MIPS code generated by compilers obeys this.
                     emit("// jr $ra", i)
@@ -537,6 +604,9 @@ class Translator:
                     table, tts = tables[i.vaddr]
                     emit(f"{{ uint32_t tgt = ki::lo32({R(i.rs)});  // jump table at 0x{table:08x}", i)
                     dslot()
+                    if self.timing:
+                        emit(f"  ki::poll(c, {u32(i.vaddr)});")
+                    emit("  if (tgt == entry_ra) return;")
                     emit("  switch (tgt) {")
                     for t in sorted(set(tts)):
                         emit(f"    case {u32(t)}: goto L_{t:08x};")
@@ -545,6 +615,9 @@ class Translator:
                 else:
                     emit(f"{{ uint32_t tgt = ki::lo32({R(i.rs)});  // computed jump: any instruction", i)
                     dslot()
+                    if self.timing:
+                        emit(f"  ki::poll(c, {u32(i.vaddr)});")
+                    emit("  if (tgt == entry_ra) return;  // return through another register")
                     emit("  switch (tgt) {")
                     for a in sorted(addrs):
                         emit(f"    case {u32(a)}: goto L_{a:08x};")
@@ -561,11 +634,13 @@ class Translator:
             if d.vaddr in slot_targets:
                 # Fall-through past the branch sequence skips the standalone copy.
                 emit(f"goto L_{d.vaddr:08x}_skip;")
-                out.append(f"L_{d.vaddr:08x}:")
+                label(f"L_{d.vaddr:08x}")
+                pending[0] += 1
                 emit(self.simple(d), d)
                 fall_through(d.vaddr + 4, idx + 2, d.vaddr)
-                out.append(f"L_{d.vaddr:08x}_skip: ;")
+                label(f"L_{d.vaddr:08x}_skip")
             idx += 2
+        flush()
         out.append("}")
         return "\n".join(out)
 
@@ -588,6 +663,8 @@ def trace_function(img: Image, start: int, stops: frozenset = frozenset(), limit
         if len(seen) > limit:
             raise TranslateError(f"function {start:08x} exceeds {limit} instructions")
         i = img.insn(a)
+        if i.name == "eret":
+            continue  # returns from the exception handler
         if i.name == "INVALID" or (i.name not in CONDITIONAL_BRANCHES and i.name not in JUMPS
                                    and not img.insn(a).text.strip()):
             raise TranslateError(f"{a:08x}: invalid instruction reached")
@@ -635,6 +712,12 @@ def discover_code_pointers(img: Image) -> set[int]:
     return out
 
 
+def write_if_changed(path, text: str):
+    # Keeps timestamps of unchanged units so the build only recompiles those that changed.
+    if not path.exists() or path.read_text() != text:
+        path.write_text(text)
+
+
 def parse_func_spec(s: str) -> tuple[int, int | None]:
     if ":" in s:
         a, b = s.split(":", 1)
@@ -658,7 +741,12 @@ def main(argv: list[str]) -> int:
                     help="read-only data image (for jump tables); repeatable")
     ap.add_argument("--expect-sha1", help="refuse to translate a different image")
     ap.add_argument("--allow-unimplemented", action="store_true")
-    ap.add_argument("--out", required=True, help="output .cpp")
+    out = ap.add_mutually_exclusive_group(required=True)
+    out.add_argument("--out", help="output .cpp (single file)")
+    out.add_argument("--out-dir", help="output directory: recompiled.h, recompiled_<k>.cpp, recompiled_table.cpp")
+    ap.add_argument("--split", type=int, default=16, help="number of .cpp files with --out-dir")
+    ap.add_argument("--no-timing", action="store_true",
+                    help="omit cycle accounting and interrupt polling (unit tests of single functions)")
     ap.add_argument("--listing", help="optional text listing of translated functions")
     args = ap.parse_args(argv)
 
@@ -670,7 +758,7 @@ def main(argv: list[str]) -> int:
     for spec in args.data:
         path, vram = spec.rsplit("@", 1)
         img.add_data(open(path, "rb").read(), int(vram, 16))
-    tr = Translator(img, args.allow_unimplemented)
+    tr = Translator(img, args.allow_unimplemented, timing=not args.no_timing)
     specs = [parse_func_spec(s) for s in args.func]
     if args.discover:
         explicit = {a for a, _ in specs}
@@ -687,58 +775,87 @@ def main(argv: list[str]) -> int:
         ptrs = sorted(discover_code_pointers(img) - cases - explicit)
         print(f"{len(ptrs)} code pointers in data images used as extra entries", file=sys.stderr)
         specs += [(t, None) for t in ptrs]
-    stops = frozenset(discover_jal_targets(img) | {a for a, _ in specs})
-    funcs, failures = [], []
-    for start, end in specs:
-        try:
-            if end is not None:
-                funcs.append(Function(start, end, [img.insn(a) for a in range(start, end, 4)]))
-                continue
+    funcs, failures, body = [], [], []
+    for _round in range(16):
+        # Tail jumps and fall-throughs can reach addresses no jal targets; those
+        # become entry points too, until nothing new turns up.
+        stops = frozenset(discover_jal_targets(img) | {a for a, _ in specs})
+        funcs, failures = [], []
+        for start, end in specs:
             try:
-                end = find_function_end(img, start, stops=stops)
-                fn = Function(start, end, [img.insn(a) for a in range(start, end, 4)])
-                Translator(img, False).translate(fn)  # probe: falls back to tracing on failure
-            except TranslateError:
-                addrs = trace_function(img, start, stops)
-                fn = Function(start, max(addrs) + 4, [img.insn(a) for a in addrs])
-            funcs.append(fn)
-        except TranslateError as e:
-            if not (args.discover or args.discover_pointers):
-                raise
-            failures.append((start, f"boundary: {e}"))
-    for fn in funcs:
-        tr.known.add(fn.start)
-    funcs.sort(key=lambda f: f.start)
-
-    body, ok_funcs = [], []
-    for fn in funcs:
-        try:
-            body.append(tr.translate(fn))
-            ok_funcs.append(fn)
-        except TranslateError as e:
-            if not (args.discover or args.discover_pointers):
-                raise
-            failures.append((fn.start, str(e)))
-    if failures:
-        tr.known -= {a for a, _ in failures}
-        body = [tr.translate(fn) for fn in ok_funcs]  # re-emit: calls to failed functions go indirect
-    funcs = ok_funcs
-    src = [
+                if end is not None:
+                    funcs.append(Function(start, end, [img.insn(a) for a in range(start, end, 4)]))
+                    continue
+                try:
+                    end = find_function_end(img, start, stops=stops)
+                    fn = Function(start, end, [img.insn(a) for a in range(start, end, 4)])
+                    Translator(img, False).translate(fn)  # probe: falls back to tracing on failure
+                except TranslateError:
+                    addrs = trace_function(img, start, stops)
+                    fn = Function(start, max(addrs) + 4, [img.insn(a) for a in addrs])
+                funcs.append(fn)
+            except TranslateError as e:
+                if not (args.discover or args.discover_pointers):
+                    raise
+                failures.append((start, f"boundary: {e}"))
+        tr.known = {fn.start for fn in funcs}
+        tr.missing = set()
+        funcs.sort(key=lambda f: f.start)
+        body, ok_funcs = [], []
+        for fn in funcs:
+            try:
+                body.append(tr.translate(fn))
+                ok_funcs.append(fn)
+            except TranslateError as e:
+                if not (args.discover or args.discover_pointers):
+                    raise
+                failures.append((fn.start, str(e)))
+        if failures:
+            tr.known -= {a for a, _ in failures}
+            tr.missing = set()
+            body = [tr.translate(fn) for fn in ok_funcs]  # re-emit: calls to failed functions go indirect
+        funcs = ok_funcs
+        new = sorted(tr.missing - {a for a, _ in failures} - {a for a, _ in specs})
+        if not (args.discover or args.discover_pointers) or not new:
+            break
+        print(f"round {_round + 1}: {len(new)} tail-jump/fall-through targets added as entries", file=sys.stderr)
+        specs += [(t, None) for t in new]
+    header = [
         "// Generated by tools/kirecomp/kirecomp.py -- do not edit.",
         f"// Source image sha1 {img.sha1}, loaded at 0x{img.vram:08x}.",
         "// Derived from the original game code: do not redistribute.",
         '#include "ki/runtime.h"', "",
-        "namespace {",
-        *[f"void func_{fn.start:08x}(ki::Context& c);" for fn in funcs], "",
-        *body,
-        "}  // namespace", "",
+        "namespace ki::gen {",
+        *[f"void func_{fn.start:08x}(ki::Context& c);" for fn in funcs],
+        "}  // namespace ki::gen", "",
+    ]
+    table = [
         "const ki::FuncEntry ki::kFunctionTable[] = {",
-        *[f"    {{0x{fn.start:08x}u, func_{fn.start:08x}}}," for fn in funcs],
+        *[f"    {{0x{fn.start:08x}u, ki::gen::func_{fn.start:08x}}}," for fn in funcs],
         "};",
         f"const std::size_t ki::kFunctionTableSize = {len(funcs)};", "",
     ]
-    with open(args.out, "w") as f:
-        f.write("\n".join(src))
+    if args.out_dir:
+        # Split into N translation units (balanced by instruction count) so the
+        # host compiler can work in parallel; the giant dispatcher functions
+        # would otherwise serialise the build.
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "recompiled.h").write_text("#pragma once\n" + "\n".join(header))
+        buckets = [[] for _ in range(args.split)]
+        loads = [0] * args.split
+        for fn, code in sorted(zip(funcs, body), key=lambda fc: -len(fc[0].insns)):
+            k = loads.index(min(loads))
+            buckets[k].append(code)
+            loads[k] += len(fn.insns)
+        for k, codes in enumerate(buckets):
+            text = ['#include "recompiled.h"', "", "namespace ki::gen {", *codes, "}  // namespace ki::gen", ""]
+            write_if_changed(out_dir / f"recompiled_{k}.cpp", "\n".join(text))
+        write_if_changed(out_dir / "recompiled_table.cpp", '#include "recompiled.h"\n\n' + "\n".join(table))
+    else:
+        src = [*header, "namespace ki::gen {", *body, "}  // namespace ki::gen", "", *table]
+        with open(args.out, "w") as f:
+            f.write("\n".join(src))
     if args.listing:
         with open(args.listing, "w") as f:
             for fn in funcs:

@@ -368,6 +368,51 @@ Remaining failures:
   bounds they also contain branches in delay slots (0x88002664, 0x8800a790).
   They need explicit bounds, or analysis of the bytecode dispatch.
 
+## 7b. Whole program on a board model (`ki_run`)
+
+All 731 entry points the translator finds are compiled into one executable,
+together with a model of the board:
+- **Entry points:** `jal` targets, code pointers in the data images, and
+  tail-jump and fall-through targets found iteratively until no new ones appear.
+- **Board** (`runtime/src/kinst_board.cpp`):
+  - the kinst.cpp I/O map;
+  - an ATA drive in PIO mode on a raw image extracted from the CHD (its SHA1
+    matches the CHD's data SHA1);
+  - VBLANK on Int0 and the IDE interrupt on Int1, both polled by the game;
+  - the COP0 Count/Compare timer on IP7. When the timer is due, the runtime
+    reproduces the SRAM vector stub and calls the recompiled handler at
+    0x880266c8; `eret` returns from it.
+- **Time:** one cycle per executed guest instruction, added per basic block.
+  Safe points (function entry, backward jumps, dispatch jumps) deliver interrupts
+  and board events.
+- **Start state:** a MAME snapshot at 0x88000000, i.e. what the original boot
+  ROM leaves behind.
+
+**Result [O]:** the recompiled program boots and plays the attract mode.
+- It shows the copyright screen with the Killer Instinct logo, the animated
+  Rareware logo and the Midway screen.
+- It reads about 5,600 sectors, and takes 0.33 s of host time for 600 frames.
+- These are the same screens MAME shows. Their timing and pixels have not yet
+  been compared frame by frame.
+
+Problems found and fixed on the way (all general, none patched per address):
+- Returns through registers other than `$ra` (`move a1,ra … jr a1`): each function
+  remembers the `$ra` it was called with.
+- A dispatcher that is called with `jal` and comes back with `j`: calls to an
+  address inside the same function become `goto`, with `jr $ra` switching over
+  the local return sites, so the host stack stays flat.
+- Tail jumps to addresses no `jal` reaches.
+- INITIALIZE DEVICE PARAMETERS (0x91). The game switches CHS addressing to
+  14 heads × 40 sectors (as MAME's `set_geometry`). Without it, the graphics
+  decompressor (0x88031170) found bad data and stopped on its assertion
+  `syscall` at 0x880311a4. This is the same address MAME stopped at with the
+  blank disk.
+
+Not modelled yet:
+- display, inputs and sound (DCS);
+- the exact cycle timing of the R4600 (caches, multiply/divide latencies);
+- disk writes are kept in memory only.
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:
@@ -389,9 +434,10 @@ The evidence now points to whole-program recompilation:
 - 562 of 567 functions translate;
 - the FPU is validated.
 
-What blocks running real code paths is no longer instruction semantics but
-control flow and system state. Jump tables, computed jumps, code-pointer entry
-points and the zero-page mapping are done (§6). In order:
+**Update:** the recompiled program now boots to the attract mode (§7b). The
+list below is kept for reference. The next steps are a frame-by-frame
+comparison with MAME (framebuffer and call sequence), then SDL for display and
+inputs, then sound. Remaining items:
 1. Bounds for the two large regions and their bytecode dispatch (0x88002038,
    0x88008cbc), and a fallback for the 3 branch-in-delay-slot sequences.
 2. A COP0 model: Status, Cause (with VBLANK/IDE pending bits supplied by the I/O

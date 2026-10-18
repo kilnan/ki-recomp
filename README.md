@@ -106,6 +106,24 @@ Survey of the whole code image (translation coverage, no validation):
     --vram 88000000 --discover --out build/survey/all.cpp
 ```
 
+## Run the whole program (headless)
+
+`cmake --build build` also builds `ki_run`, the whole game recompiled (every
+entry point the translator finds) on a model of the board. It covers I/O, the
+IDE drive on a raw disk image, VBLANK, the COP0 timer and interrupts. It starts
+from the state the original boot ROM leaves when it enters the game, captured
+once in MAME:
+
+```sh
+.venv/bin/python tools/mame_capture.py --func 88000000 --seconds 30 capture --hit 1 \
+    --entry-only --out traces/bootstate
+chdman extracthd -i data/roms/kinst/kinst.chd -o data/kinst.img
+build/ki_run --boot traces/bootstate --disk data/kinst.img --rom data/roms/kinst/ki-l15d.u98 \
+    --frames 600 --dump-every 60 --out traces/run     # framebuffers as PPM
+```
+
+`KI_TRACE_IDE=1` logs disk commands. There is no window, input or sound yet.
+
 ## License and game data
 
 The code in this repository is released under the [MIT License](LICENSE).

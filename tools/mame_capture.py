@@ -31,9 +31,11 @@ from pathlib import Path
 GPR = ["zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
        "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"]
 FPR = [f"fpr{i}" for i in range(32)]
+COP0 = ["sr", "cause", "epc", "count", "compare", "entryhi", "entrylo0", "entrylo1", "pagemask", "wired",
+        "index", "badvaddr"]
 # ccr31 = FCSR. FPRs are printed as 64-bit raw values; the comparison only
 # uses their low 32 bits (see tests/compare_case.cpp).
-REGS = GPR + ["hi", "lo", "pc"] + FPR + ["ccr31"]
+REGS = GPR + ["hi", "lo", "pc"] + FPR + ["ccr31"] + COP0
 SRAM = (0x80000000, 0x80000)   # logical KSEG0 address, length
 DRAM = (0x88000000, 0x800000)
 
@@ -150,8 +152,11 @@ def cmd_capture(args) -> int:
                 f"save {out}/{prefix}_dram.bin,{DRAM[0]:x},{DRAM[1]:x}"]
 
     exit_action = ";".join([regs_printf("KI_EXIT"), *saves("exit"), "quit"])
-    entry_action = ";".join([*inject, regs_printf("KI_ENTRY"), *saves("entry"),
-                             "temp1=sp", f"bpset ra,sp==temp1,{{{exit_action}}}", "g"])
+    if args.entry_only:
+        entry_action = ";".join([*inject, regs_printf("KI_ENTRY"), *saves("entry"), "quit"])
+    else:
+        entry_action = ";".join([*inject, regs_printf("KI_ENTRY"), *saves("entry"),
+                                 "temp1=sp", f"bpset ra,sp==temp1,{{{exit_action}}}", "g"])
     # Optional filter: only calls satisfying --when are counted by --hit.
     when = f"({args.when})" if args.when else "1"
     cond = f"((temp0=temp0+({when}!=0))=={args.hit})&&{when}"
@@ -160,10 +165,12 @@ def cmd_capture(args) -> int:
     (out / "console.log").write_text("\n".join(lines) + "\n")
     entry = " ".join(l for l in lines if l.startswith("KI_ENTRY")) or None
     exit_ = " ".join(l for l in lines if l.startswith("KI_EXIT")) or None
+    if args.entry_only:
+        exit_ = entry
     if not entry or not exit_:
         print(f"capture failed (entry={bool(entry)} exit={bool(exit_)}); see {out}/console.log", file=sys.stderr)
         return 1
-    for name, line in (("entry", entry), ("exit", exit_)):
+    for name, line in (("entry", entry),) + ((("exit", exit_),) if not args.entry_only else ()):
         regs = parse_regs(line)
         missing = [r for r in REGS if r not in regs]
         if missing:
@@ -216,6 +223,8 @@ def main(argv: list[str]) -> int:
     pc = sub.add_parser("capture")
     pc.add_argument("--hit", type=int, required=True, help="1-based index of the entry hit")
     pc.add_argument("--when", help="debugger expression; only matching calls are counted")
+    pc.add_argument("--entry-only", action="store_true",
+                    help="snapshot only the state at the entry breakpoint (e.g. a boot-state snapshot)")
     pc.add_argument("--blank-disk", action="store_true",
                     help="boot with the all-zero disk (data/blankchd) even if kinst.chd is present")
     pc.add_argument("--play", dest="play_case", type=int, metavar="SEED", help="same as the global --play")

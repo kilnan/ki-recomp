@@ -33,11 +33,18 @@ constexpr uint32_t kZeroPagePhys = 0x08090000, kZeroPageSize = 0x1000;
 
 struct Context;
 
-// Called for physical addresses outside SRAM/DRAM. size is 1, 2, 4 or 8.
+// The board around the CPU: I/O space (physical addresses outside SRAM/DRAM;
+// size is 1, 2, 4 or 8) and the external interrupt lines.
 struct IoHandler {
     virtual ~IoHandler() = default;
     virtual uint64_t read(Context& ctx, uint32_t phys, int size) = 0;
     virtual void write(Context& ctx, uint32_t phys, int size, uint64_t value) = 0;
+    // Cause.IP bits (mask 0x7c00 for Int0..Int4) driven by the board at ctx.cycles.
+    virtual uint32_t interrupt_lines(Context&) { return 0; }
+    // Cycle count at which the board next needs attention (line changes, frames).
+    virtual uint64_t next_event(Context&) { return ~0ull; }
+    // Called from safe points once ctx.cycles reaches next_event().
+    virtual void update(Context&) {}
 };
 
 enum class Fault { AddressErrorLoad, AddressErrorStore, Overflow, Tlb, Unimplemented, Syscall, Break, Trap };
@@ -50,6 +57,13 @@ struct Context {
     // and writes leave the high half untouched (as MAME's DRC does).
     uint64_t f[32] = {};
     uint32_t fcsr = 0;  // FCR31: rounding mode in bits 0-1, condition bit 23
+    // COP0 registers (Count and Cause are derived on read, see mfc0).
+    uint64_t cp0[32] = {};
+    // Guest time: one cycle per executed instruction (added by generated code).
+    uint64_t cycles = 0;
+    uint64_t count_base = 0;           // Count = count_base + cycles / 2
+    uint32_t last_count = 0;           // Count at the last timer check
+    uint64_t next_event = ~0ull;       // poll() calls service() when cycles reach it
     std::vector<uint8_t> sram = std::vector<uint8_t>(kSramSize);
     std::vector<uint8_t> dram = std::vector<uint8_t>(kDramSize);
     IoHandler* io = nullptr;
@@ -227,6 +241,22 @@ uint64_t cfc1(const Context& c, unsigned reg);
 void ctc1(Context& c, unsigned reg, uint64_t value);
 
 // ---- coprocessor 0 / system (not needed by the first proof; trap loudly) ---
+// COP0 register numbers used by the game.
+enum : unsigned { kCp0Index = 0, kCp0EntryLo0 = 2, kCp0EntryLo1 = 3, kCp0PageMask = 5, kCp0Wired = 6,
+                  kCp0BadVAddr = 8, kCp0Count = 9, kCp0EntryHi = 10, kCp0Compare = 11, kCp0Status = 12,
+                  kCp0Cause = 13, kCp0Epc = 14, kCp0PRId = 15, kCp0Config = 16 };
+// Exception vector handler the game installs at 0x80000180 jumps here (SRAM
+// stub: sd sp,0x1f0($zero); sp = 0x880266c8; jr sp).
+constexpr uint32_t kExceptionHandler = 0x880266c8;
+
+// Safe point: called by generated code at function entry and backward jumps.
+void service(Context& c, uint32_t pc);
+inline void poll(Context& c, uint32_t pc) {
+    if (c.cycles >= c.next_event) service(c, pc);
+}
+void schedule(Context& c);  // recompute next_event after state changes
+void eret(Context& c);
+
 uint64_t mfc0(Context& c, unsigned reg, uint32_t pc);
 void mtc0(Context& c, unsigned reg, uint64_t value, uint32_t pc);
 void cop0_op(Context& c, uint32_t instr, uint32_t pc);  // tlbwi, tlbr, eret, ...
