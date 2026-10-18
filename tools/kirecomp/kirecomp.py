@@ -419,17 +419,20 @@ class Translator:
 
     def translate(self, fn: Function) -> str:
         insns = fn.insns
+        # Instructions may be non-contiguous when bounds come from control-flow
+        # tracing (trace_function); "inside" means reached, not "in the range".
+        addrs = {i.vaddr for i in insns}
         targets = set()
         tables: dict[int, tuple[int, list[int]]] = {}
         for i in insns:
             if i.name == "jr" and i.rs != 31:
                 jt = jump_table(self.img, i, fn.start, fn.end)
                 if jt:
-                    tables[i.vaddr] = jt
-                    targets.update(jt[1])
-            if i.name in CONDITIONAL_BRANCHES and fn.start <= i.branch_target < fn.end:
+                    tables[i.vaddr] = (jt[0], [t for t in jt[1] if t in addrs])
+                    targets.update(tables[i.vaddr][1])
+            if i.name in CONDITIONAL_BRANCHES and i.branch_target in addrs:
                 targets.add(i.branch_target)
-            if i.name == "j" and fn.start <= i.jump_target < fn.end:
+            if i.name == "j" and i.jump_target in addrs:
                 targets.add(i.jump_target)
         # A computed jump we cannot resolve (hand-written code: jumps into
         # unrolled loops, continuations in registers) may land on any
@@ -437,7 +440,7 @@ class Translator:
         # the jump dispatches over all of them.
         unresolved = [i for i in insns if i.name == "jr" and i.rs != 31 and i.vaddr not in tables]
         if unresolved:
-            targets.update(i.vaddr for i in insns)
+            targets.update(addrs)
         # A branch may target an instruction that is also the delay slot of a
         # preceding branch (loop rotation). Reached that way it is an ordinary
         # instruction, so it is emitted a second time, standalone, after the
@@ -446,7 +449,7 @@ class Translator:
         for k, i in enumerate(insns[:-1]):
             if has_delay_slot(i) and insns[k + 1].vaddr in targets:
                 slot_targets.add(insns[k + 1].vaddr)
-                if insns[k + 1].vaddr + 4 < fn.end:
+                if insns[k + 1].vaddr + 4 in addrs:
                     targets.add(insns[k + 1].vaddr + 4)
         out = [f"void func_{fn.start:08x}(ki::Context& c) {{",
                f"    // guest 0x{fn.start:08x}-0x{fn.end:08x} ({len(insns)} instructions)",
@@ -456,6 +459,13 @@ class Translator:
             cmt = f"  // {i.vaddr:08x}: {i.word:08x}  {i.text}" if i else ""
             out.append(f"    {line}{cmt}")
 
+        def fall_through(next_addr: int, next_idx: int, pc: int):
+            # Control reaches next_addr sequentially; if that is not the next
+            # emitted instruction, continue in the function that starts there
+            # (shared tails, functions that do not return).
+            if next_idx >= len(insns) or insns[next_idx].vaddr != next_addr:
+                emit(f"{self.call(next_addr, pc)} return;  // fall through to 0x{next_addr:08x}")
+
         idx = 0
         while idx < len(insns):
             i = insns[idx]
@@ -464,18 +474,33 @@ class Translator:
             if not has_delay_slot(i):
                 emit(self.simple(i), i)
                 idx += 1
+                fall_through(i.vaddr + 4, idx, i.vaddr)
                 continue
-            if idx + 1 >= len(insns):
+            if idx + 1 >= len(insns) or insns[idx + 1].vaddr != i.vaddr + 4:
                 raise TranslateError(f"{i.vaddr:08x}: delay slot outside function")
             d = insns[idx + 1]
             if has_delay_slot(d):
-                raise TranslateError(f"{d.vaddr:08x}: control transfer in delay slot")
+                # Branch in a delay slot (UNPREDICTABLE in the ISA). The game
+                # uses it only as `bnez x,L; beqz x,L`-style pairs whose
+                # conditions exclude each other (0x880322d4, 0x880106b8, and the
+                # boot ROM decoder): if the first is taken, the second is not and
+                # control goes to the first target; otherwise the second runs as
+                # an ordinary branch with its own delay slot. Both taken traps.
+                plain = CONDITIONAL_BRANCHES - LIKELY - {"bltzal", "bgezal"}
+                if i.name not in plain or d.name not in plain:
+                    raise TranslateError(f"{d.vaddr:08x}: control transfer in delay slot")
+                t = i.branch_target
+                go = f"goto L_{t:08x};" if t in addrs else f"{{ {self.call(t, i.vaddr)} return; }}"
+                emit(f"br = {self.branch_cond(i)};", i)
+                emit(f"if (br) {{ if ({self.branch_cond(d)}) ki::raise_fault(c, ki::Fault::Unimplemented, "
+                     f"{u32(d.vaddr)}); {go} }}")
+                idx += 1
+                continue
             ret = u32(i.vaddr + 8)
             dslot = lambda: emit("    " + self.simple(d), d)  # noqa: E731
             if i.name in CONDITIONAL_BRANCHES:
                 t = i.branch_target
-                inside = fn.start <= t < fn.end
-                go = f"goto L_{t:08x};" if inside else f"{{ {self.call(t, i.vaddr)} return; }}"
+                go = f"goto L_{t:08x};" if t in addrs else f"{{ {self.call(t, i.vaddr)} return; }}"
                 link = i.name in ("bltzal", "bgezal", "bltzall", "bgezall")
                 emit(f"br = {self.branch_cond(i)};", i)
                 if link:
@@ -492,7 +517,7 @@ class Translator:
                 t = i.jump_target
                 emit(f"// j 0x{t:08x}", i)
                 dslot()
-                if fn.start <= t < fn.end:
+                if t in addrs:
                     emit(f"goto L_{t:08x};")
                 else:
                     emit(f"{self.call(t, i.vaddr)} return;  // tail call")
@@ -521,7 +546,7 @@ class Translator:
                     emit(f"{{ uint32_t tgt = ki::lo32({R(i.rs)});  // computed jump: any instruction", i)
                     dslot()
                     emit("  switch (tgt) {")
-                    for a in range(fn.start, fn.end, 4):
+                    for a in sorted(addrs):
                         emit(f"    case {u32(a)}: goto L_{a:08x};")
                     emit(f"    default: ki::call_indirect(c, tgt, {u32(i.vaddr)}); return;")
                     emit("  } }")
@@ -531,25 +556,58 @@ class Translator:
                     emit(f"  c.r[{i.rd}] = ki::sx32({ret});")
                 dslot()
                 emit(f"  ki::call_indirect(c, tgt, {u32(i.vaddr)}); }}")
+            if i.name not in ("j", "jr"):
+                fall_through(i.vaddr + 8, idx + 2, i.vaddr)
             if d.vaddr in slot_targets:
-                last_slot = d.vaddr + 4 >= fn.end
                 # Fall-through past the branch sequence skips the standalone copy.
-                emit(f"goto L_{fn.end:08x}_end;" if last_slot else f"goto L_{d.vaddr + 4:08x};")
+                emit(f"goto L_{d.vaddr:08x}_skip;")
                 out.append(f"L_{d.vaddr:08x}:")
                 emit(self.simple(d), d)
-                if last_slot:
-                    # Reached by a jump, the last delay slot runs into the next function.
-                    emit(f"{self.call(fn.end, d.vaddr)} return;")
-                    out.append(f"L_{fn.end:08x}_end: ;")
+                fall_through(d.vaddr + 4, idx + 2, d.vaddr)
+                out.append(f"L_{d.vaddr:08x}_skip: ;")
             idx += 2
-        last = insns[-2] if len(insns) >= 2 else None
-        ends_in_transfer = last is not None and (last.name == "jr" or last.name == "j")
-        if not ends_in_transfer:
-            # Execution falls through into the next function (shared tail or a
-            # function that does not return): continue there.
-            out.append(f"    {self.call(fn.end, fn.end - 4)} return;  // fall through to 0x{fn.end:08x}")
         out.append("}")
         return "\n".join(out)
+
+
+def trace_function(img: Image, start: int, stops: frozenset = frozenset(), limit: int = 30000) -> list[int]:
+    """Bounds by reachability: follow branches, in-function jumps and jump
+    tables from the entry; calls return, `jr $ra` ends a path, jumps to another
+    known entry are tail calls. Avoids decoding data embedded in code, which
+    the linear scan of find_function_end runs into."""
+    seen, work = set(), [start]
+    while work:
+        a = work.pop()
+        if a in seen:
+            continue
+        if not img.contains(a):
+            raise TranslateError(f"function {start:08x} reaches {a:08x} outside the image")
+        if a != start and a in stops:
+            continue  # sequential flow into another function: emitted as a tail call
+        seen.add(a)
+        if len(seen) > limit:
+            raise TranslateError(f"function {start:08x} exceeds {limit} instructions")
+        i = img.insn(a)
+        if i.name == "INVALID" or (i.name not in CONDITIONAL_BRANCHES and i.name not in JUMPS
+                                   and not img.insn(a).text.strip()):
+            raise TranslateError(f"{a:08x}: invalid instruction reached")
+        if not has_delay_slot(i):
+            work.append(a + 4)
+            continue
+        work.append(a + 4)  # delay slot
+        seen.add(a + 4)
+        if i.name in CONDITIONAL_BRANCHES:
+            work += [i.branch_target, a + 8]
+        elif i.name == "j":
+            if i.jump_target == start or i.jump_target not in stops:
+                work.append(i.jump_target)
+        elif i.name in ("jal", "jalr"):
+            work.append(a + 8)
+        elif i.name == "jr" and i.rs != 31:
+            jt = jump_table(img, i, start, start + 0x40000)
+            if jt:
+                work += jt[1]
+    return sorted(seen)
 
 
 def discover_jal_targets(img: Image) -> set[int]:
@@ -633,8 +691,17 @@ def main(argv: list[str]) -> int:
     funcs, failures = [], []
     for start, end in specs:
         try:
-            end = end if end is not None else find_function_end(img, start, stops=stops)
-            funcs.append(Function(start, end, [img.insn(a) for a in range(start, end, 4)]))
+            if end is not None:
+                funcs.append(Function(start, end, [img.insn(a) for a in range(start, end, 4)]))
+                continue
+            try:
+                end = find_function_end(img, start, stops=stops)
+                fn = Function(start, end, [img.insn(a) for a in range(start, end, 4)])
+                Translator(img, False).translate(fn)  # probe: falls back to tracing on failure
+            except TranslateError:
+                addrs = trace_function(img, start, stops)
+                fn = Function(start, max(addrs) + 4, [img.insn(a) for a in addrs])
+            funcs.append(fn)
         except TranslateError as e:
             if not (args.discover or args.discover_pointers):
                 raise
