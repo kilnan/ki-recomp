@@ -64,6 +64,24 @@ struct Context {
     uint64_t count_base = 0;           // Count = count_base + cycles / 2
     uint32_t last_count = 0;           // Count at the last timer check
     uint64_t next_event = ~0ull;       // poll() calls service() when cycles reach it
+    // Host call depth of recompiled functions, with the most recent entries
+    // (diagnostics for runaway recursion, e.g. tail-call chains in a loop).
+    uint64_t interrupts_taken = 0;
+    uint32_t depth = 0;
+    // Pending tail call: set by a function that ends by jumping to another
+    // function, run by the trampoline (drain) at the nearest real call site.
+    void (*tail_fn)(Context&) = nullptr;
+    uint32_t recent[64] = {};
+    uint32_t recent_pos = 0;
+    // Optional log of every function entry (diagnostics): appended while non-null.
+    std::vector<uint32_t>* call_log = nullptr;
+    // Optional per-instruction hook, called by code generated with --trace.
+    void (*trace_fn)(Context&, uint32_t pc) = nullptr;
+    // Optional hook when a given function is entered (diagnostics).
+    uint32_t watch_entry = 0;
+    void (*on_watch)(Context&) = nullptr;
+    uint32_t recent_service_pc[64] = {};  // safe points where service() ran
+    uint32_t recent_service_pos = 0;
     std::vector<uint8_t> sram = std::vector<uint8_t>(kSramSize);
     std::vector<uint8_t> dram = std::vector<uint8_t>(kDramSize);
     IoHandler* io = nullptr;
@@ -91,6 +109,17 @@ struct FuncEntry {
 extern const FuncEntry kFunctionTable[];
 extern const std::size_t kFunctionTableSize;
 RecompFunc lookup_function(uint32_t vaddr);
+
+inline void tail(Context& c, RecompFunc fn) { c.tail_fn = fn; }
+void tail_indirect(Context& c, uint32_t target, uint32_t pc);
+// Trampoline: runs pending tail calls until a function returns normally.
+inline void drain(Context& c) {
+    while (c.tail_fn) {
+        RecompFunc fn = c.tail_fn;
+        c.tail_fn = nullptr;
+        fn(c);
+    }
+}
 
 // ---- arithmetic helpers (no undefined behaviour) ---------------------------
 
@@ -248,6 +277,26 @@ enum : unsigned { kCp0Index = 0, kCp0EntryLo0 = 2, kCp0EntryLo1 = 3, kCp0PageMas
 // Exception vector handler the game installs at 0x80000180 jumps here (SRAM
 // stub: sd sp,0x1f0($zero); sp = 0x880266c8; jr sp).
 constexpr uint32_t kExceptionHandler = 0x880266c8;
+
+#define KI_TRACE(c, pc)                                  \
+    do {                                                 \
+        if ((c).trace_fn) (c).trace_fn((c), (pc));       \
+    } while (0)
+
+constexpr uint32_t kMaxDepth = 20000;
+[[noreturn]] void raise_fault(Context& ctx, Fault fault, uint32_t pc, uint32_t addr);
+// Scope guard placed at the top of every whole-program function.
+struct FrameGuard {
+    Context& c;
+    FrameGuard(Context& ctx, uint32_t vaddr) : c(ctx) {
+        c.recent[c.recent_pos++ & 63] = vaddr;
+        if (c.call_log) c.call_log->push_back(vaddr);
+        if (c.trace_fn) c.trace_fn(c, vaddr | 1);  // odd = function entry marker
+        if (vaddr == c.watch_entry && c.on_watch) c.on_watch(c);
+        if (++c.depth > kMaxDepth) raise_fault(c, Fault::Unimplemented, vaddr, 0xdeeedeee);
+    }
+    ~FrameGuard() { --c.depth; }
+};
 
 // Safe point: called by generated code at function entry and backward jumps.
 void service(Context& c, uint32_t pc);

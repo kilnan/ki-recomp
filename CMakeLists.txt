@@ -75,6 +75,15 @@ endforeach()
 option(KI_BUILD_FULL "build the whole-program executable ki_run" ON)
 if(KI_BUILD_FULL)
   set(KI_SPLIT 16 CACHE STRING "number of generated translation units for the whole program")
+  # Return sites that mid-game snapshots (tools/mame_snapshot.py) continue at
+  # after their entry function returns: in the main loop after the per-frame
+  # call at 0x880007e0, after the dispatcher call at 0x8800099c, and in the
+  # main loop at 0x8802aa24 after its call to 0x88003e08.
+  set(KI_EXTRA_ENTRIES "880007e8;880009a4;8802af78" CACHE STRING "additional entry points for the whole program")
+  set(extra_args "")
+  foreach(e IN LISTS KI_EXTRA_ENTRIES)
+    list(APPEND extra_args --func ${e})
+  endforeach()
   set(FULL_DIR "${CMAKE_BINARY_DIR}/gen_full")
   set(full_srcs "${FULL_DIR}/recompiled_table.cpp")
   math(EXPR last "${KI_SPLIT} - 1")
@@ -89,7 +98,7 @@ if(KI_BUILD_FULL)
     OUTPUT ${full_srcs} "${FULL_DIR}/recompiled.h"
     COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
             --image "${KI_CODE_IMAGE}" --vram 88000000 --expect-sha1 ${KI_CODE_IMAGE_SHA1} ${data_args}
-            --func 88000000 --func 880266c8 --discover --discover-pointers
+            --func 88000000 --func 880266c8 ${extra_args} --discover --discover-pointers
             --out-dir "${FULL_DIR}" --split ${KI_SPLIT}
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_CODE_IMAGE}" ${data_deps}
     COMMENT "Recompiling the whole program"
@@ -101,6 +110,50 @@ if(KI_BUILD_FULL)
   if(NOT MSVC)
     target_compile_options(ki_full_code PRIVATE -O1 -Wno-unused-parameter)
   endif()
+  # compare_case against the whole program and the board model (for captures of
+  # functions that call other code or touch I/O).
+  add_executable(compare_full tests/compare_case.cpp)
+  target_compile_definitions(compare_full PRIVATE KI_COMPARE_FULL)
+  target_link_libraries(compare_full PRIVATE ki_full_code)
+
+  # Same program generated with a per-instruction trace hook (lockstep debugging).
+  option(KI_BUILD_TRACE "build ki_run_trace" OFF)
+  if(KI_BUILD_TRACE)
+    set(TRACE_DIR "${CMAKE_BINARY_DIR}/gen_trace")
+    set(trace_srcs "${TRACE_DIR}/recompiled_table.cpp")
+    foreach(k RANGE ${last})
+      list(APPEND trace_srcs "${TRACE_DIR}/recompiled_${k}.cpp")
+    endforeach()
+    add_custom_command(
+      OUTPUT ${trace_srcs} "${TRACE_DIR}/recompiled.h"
+      COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
+              --image "${KI_CODE_IMAGE}" --vram 88000000 --expect-sha1 ${KI_CODE_IMAGE_SHA1} ${data_args}
+              --func 88000000 --func 880266c8 ${extra_args} --discover --discover-pointers --trace
+              --out-dir "${TRACE_DIR}" --split ${KI_SPLIT}
+      DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_CODE_IMAGE}" ${data_deps}
+      COMMENT "Recompiling the whole program with trace hooks"
+      VERBATIM)
+    add_library(ki_trace_code STATIC ${trace_srcs})
+    target_include_directories(ki_trace_code PRIVATE "${TRACE_DIR}")
+    target_link_libraries(ki_trace_code PUBLIC ki_runtime)
+    if(NOT MSVC)
+      target_compile_options(ki_trace_code PRIVATE -O1 -Wno-unused-parameter)
+    endif()
+    add_executable(ki_run_trace src/ki_run.cpp src/ki_boot.cpp)
+    target_link_libraries(ki_run_trace PRIVATE ki_trace_code)
+  endif()
+
+  add_library(ki_boot STATIC src/ki_boot.cpp)
+  target_link_libraries(ki_boot PUBLIC ki_runtime)
   add_executable(ki_run src/ki_run.cpp)
-  target_link_libraries(ki_run PRIVATE ki_full_code)
+  target_link_libraries(ki_run PRIVATE ki_boot ki_full_code)
+
+  # Windowed player: needs SDL2 (on macOS: brew install sdl2-compat or sdl2).
+  find_package(SDL2 CONFIG QUIET)
+  if(SDL2_FOUND)
+    add_executable(ki_play src/ki_play.cpp)
+    target_link_libraries(ki_play PRIVATE ki_boot ki_full_code SDL2::SDL2)
+  else()
+    message(STATUS "SDL2 not found: ki_play is not built")
+  endif()
 endif()

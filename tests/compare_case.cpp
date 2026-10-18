@@ -16,6 +16,9 @@
 #include <vector>
 
 #include "ki/runtime.h"
+#ifdef KI_COMPARE_FULL
+#include "ki/kinst_board.h"
+#endif
 
 namespace {
 
@@ -91,6 +94,23 @@ int main(int argc, char** argv) {
     const auto exit_sram = read_file(dir + "/exit_sram.bin", ki::kSramSize);
     const auto exit_dram = read_file(dir + "/exit_dram.bin", ki::kDramSize);
 
+#ifdef KI_COMPARE_FULL
+    // Whole-program variant: the board model answers I/O (inputs released,
+    // disk from KI_DISK, boot ROM from KI_ROM), timing and interrupts run.
+    static std::vector<uint8_t> disk, rom;
+    if (const char* p = std::getenv("KI_DISK")) disk = read_file(p, 131076608);
+    if (const char* p = std::getenv("KI_ROM")) rom = read_file(p, 0x80000);
+    static ki::KinstBoard board(disk, rom);
+    board.set_logical_geometry(14, 40);
+    c.io = &board;
+    if (entry.count("count")) {
+        c.cp0[ki::kCp0Status] = entry.at("sr");
+        c.cp0[ki::kCp0Compare] = entry.at("compare");
+        c.count_base = static_cast<uint32_t>(entry.at("count"));
+        c.last_count = static_cast<uint32_t>(entry.at("count"));
+    }
+    ki::schedule(c);
+#endif
     ki::RecompFunc fn = ki::lookup_function(func);
     if (!fn) {
         std::fprintf(stderr, "function %08x is not in the recompiled table\n", func);
@@ -98,6 +118,7 @@ int main(int argc, char** argv) {
     }
     try {
         fn(c);
+        ki::drain(c);  // tail calls to other recompiled functions
     } catch (const ki::GuestFault& f) {
         std::printf("FAIL %s: guest fault %d at pc=%08x addr=%08x\n", dir.c_str(), static_cast<int>(f.fault), f.pc,
                     f.addr);

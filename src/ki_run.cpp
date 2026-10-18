@@ -1,7 +1,10 @@
 // Runs the recompiled Killer Instinct program on the board model, headless.
 //
 // usage: ki_run --boot <dir> --disk <kinst.img> --rom <ki-l15d.u98>
-//               [--frames N] [--dump-every K] [--out <dir>]
+//               [--frames N] [--dump-every K] [--out <dir>] [--inputs <file>]
+//
+// --inputs replays a script of "frame port bit value" lines (port 1 or 2, bit
+// mask of the P1/P2 port, value 1 = pressed), e.g. from tools/make_input_script.py.
 //
 // --boot is a boot-state snapshot (tools/mame_capture.py --entry-only at
 // 0x88000000): SRAM, DRAM and CPU/COP0 registers as the original boot ROM
@@ -9,35 +12,16 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
-#include <map>
 #include <string>
 #include <vector>
 
 #include "ki/kinst_board.h"
 #include "ki/runtime.h"
+#include "ki_boot.h"
 
 namespace {
-
-const char* kGpr[32] = {"zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
-                        "s0",   "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"};
-
-std::vector<uint8_t> read_file(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        std::fprintf(stderr, "cannot open %s\n", path.c_str());
-        std::exit(2);
-    }
-    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-}
-
-std::map<std::string, uint64_t> read_regs(const std::string& path) {
-    std::ifstream in(path);
-    std::map<std::string, uint64_t> regs;
-    std::string name, value;
-    while (in >> name >> value) regs[name] = std::stoull(value, nullptr, 16);
-    return regs;
-}
 
 void write_ppm(const std::string& path, const std::vector<uint8_t>& rgb) {
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -50,7 +34,14 @@ void write_ppm(const std::string& path, const std::vector<uint8_t>& rgb) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string boot, disk, rom, out = ".";
+    std::string boot, disk, rom, out = ".", inputs;
+    static uint32_t dump_at = 0;
+    static unsigned long dump_hit = 1;
+    static uint64_t call_log_from = ~0ull;  // frame from which function entries are logged
+    static std::vector<uint32_t> call_log;
+    static std::string trace_path;
+    static uint64_t trace_max = 1000000;
+    static std::string dump_dir;
     uint64_t frames = 600, dump_every = 60;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i], v = argv[i + 1];
@@ -60,6 +51,15 @@ int main(int argc, char** argv) {
         else if (k == "--frames") frames = std::stoull(v);
         else if (k == "--dump-every") dump_every = std::stoull(v);
         else if (k == "--out") out = v;
+        else if (k == "--inputs") inputs = v;
+        else if (k == "--dump-at") {  // ADDR[:N] = N-th entry (default 1)
+            size_t colon = v.find(':');
+            dump_at = static_cast<uint32_t>(std::stoul(v.substr(0, colon), nullptr, 16));
+            if (colon != std::string::npos) dump_hit = std::stoul(v.substr(colon + 1));
+        }
+        else if (k == "--call-log-from") call_log_from = std::stoull(v);
+        else if (k == "--trace-out") trace_path = v;
+        else if (k == "--trace-max") trace_max = std::stoull(v);
     }
     if (boot.empty() || disk.empty() || rom.empty()) {
         std::fprintf(stderr, "usage: %s --boot <dir> --disk <img> --rom <u98> [--frames N] [--dump-every K] [--out dir]\n",
@@ -68,25 +68,39 @@ int main(int argc, char** argv) {
     }
 
     static ki::Context c;
-    auto regs = read_regs(boot + "/entry_regs.txt");
-    for (int i = 0; i < 32; ++i) c.r[i] = regs.at(kGpr[i]);
-    c.hi = regs.at("hi");
-    c.lo = regs.at("lo");
-    for (int i = 0; i < 32; ++i) c.f[i] = regs.at("fpr" + std::to_string(i));
-    c.fcsr = static_cast<uint32_t>(regs.at("ccr31"));
-    c.cp0[ki::kCp0Status] = regs.at("sr");
-    c.cp0[ki::kCp0Cause] = regs.at("cause") & ~0xff00ull;  // pending lines are recomputed
-    c.cp0[ki::kCp0Epc] = regs.at("epc");
-    c.cp0[ki::kCp0Compare] = regs.at("compare");
-    c.count_base = static_cast<uint32_t>(regs.at("count"));
-    c.last_count = static_cast<uint32_t>(regs.at("count"));
-    c.sram = read_file(boot + "/entry_sram.bin");
-    c.dram = read_file(boot + "/entry_dram.bin");
-
-    static ki::KinstBoard board(read_file(disk), read_file(rom));
+    uint32_t entry = ki::load_boot_state(c, boot);
+    static ki::KinstBoard board(ki::read_file_or_die(disk), ki::read_file_or_die(rom));
     c.io = &board;
+    if (entry != 0x88000000u) board.set_logical_geometry(14, 40);  // set by the boot code (IDE command 0x91)
+    {
+        std::ifstream scr(boot + "/screen.json");  // mid-game snapshots record the beam position
+        std::string text((std::istreambuf_iterator<char>(scr)), std::istreambuf_iterator<char>());
+        size_t p = text.find("\"to_vblank_ns\":");
+
+        if (p != std::string::npos)
+            board.set_cycles_to_vblank(std::stoull(text.substr(p + 15)) / 10);  // 100 MHz: 10 ns per cycle
+    }
+    struct Event {
+        uint64_t frame;
+        int port;
+        uint32_t bit;
+        int value;
+    };
+    std::vector<Event> script;
+    if (!inputs.empty()) {
+        std::ifstream in(inputs);
+        Event e;
+        while (in >> e.frame >> e.port >> std::hex >> e.bit >> std::dec >> e.value) script.push_back(e);
+    }
+    size_t next_event = 0;
     auto t0 = std::chrono::steady_clock::now();
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
+        if (frame == call_log_from) ctx.call_log = &call_log;
+        while (next_event < script.size() && script[next_event].frame <= frame) {
+            const Event& e = script[next_event++];
+            uint32_t& port = e.port == 1 ? board.p1 : board.p2;
+            port = e.value ? (port & ~e.bit) : (port | e.bit);
+        }
         if (frame % dump_every == 0 || frame >= frames) {
             char name[64];
             std::snprintf(name, sizeof name, "/frame_%05llu.ppm", static_cast<unsigned long long>(frame));
@@ -99,28 +113,111 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(board.stats.sectors_written), board.stats.unknown_io);
             std::fflush(stdout);
         }
-        if (frame >= frames) std::exit(0);
+        if (frame + 60 == frames) board.io_histogram_on = true;  // last second only
+        if (frame >= frames) {
+            if (!call_log.empty()) {
+                FILE* f = std::fopen((out + "/calls.txt").c_str(), "w");
+                for (uint32_t a : call_log) std::fprintf(f, "%08x\n", a);
+                std::fclose(f);
+            }
+            std::printf("I/O accesses in the last 60 frames (9xxxxxxx = write):");
+            for (auto& [a, n] : board.io_histogram()) std::printf(" %08x:%llu", a, static_cast<unsigned long long>(n));
+            std::printf("\nrecent function entries (oldest first):");
+            for (uint32_t k = 0; k < 64; ++k) {
+                if (k % 8 == 0) std::printf("\n   ");
+                std::printf(" %08x", ctx.recent[(ctx.recent_pos + k) & 63]);
+            }
+            std::printf("\nsaved frame Count [0x88089f08] = %08x\n",
+                        ctx.dram[0x89f08] | ctx.dram[0x89f09] << 8 | ctx.dram[0x89f0a] << 16 |
+                            static_cast<uint32_t>(ctx.dram[0x89f0b]) << 24);
+            std::printf("interrupts %llu compare %08llx count %08llx\n",
+                        static_cast<unsigned long long>(ctx.interrupts_taken),
+                        static_cast<unsigned long long>(ctx.cp0[ki::kCp0Compare]),
+                        static_cast<unsigned long long>(ki::mfc0(ctx, ki::kCp0Count, 0)));
+            std::printf("safe points where service ran (oldest first):");
+            for (uint32_t k = 0; k < 64; ++k) {
+                if (k % 8 == 0) std::printf("\n   ");
+                std::printf(" %08x", ctx.recent_service_pc[(ctx.recent_service_pos + k) & 63]);
+            }
+            std::printf("\n");
+            uint32_t s8 = ki::lo32(ctx.r[30]);
+            std::printf("s8 %08x:", s8);
+            if (s8 - 0x88000000u < ki::kDramSize - 16)
+                for (int i = 0; i < 16; ++i) std::printf(" %02x", ctx.dram[s8 - 0x88000000u + i]);
+            std::printf("\nstatus %08llx cause %08llx  sound writes %llu\n",
+                        static_cast<unsigned long long>(ctx.cp0[ki::kCp0Status]),
+                        static_cast<unsigned long long>(ki::mfc0(ctx, ki::kCp0Cause, 0)),
+                        static_cast<unsigned long long>(board.stats.sound_writes));
+            std::exit(0);
+        }
     };
-    ki::schedule(c);
-
-    uint32_t entry = ki::lo32(c.r[31]);  // the boot ROM jumps to $ra = 0x88000000
-    ki::RecompFunc fn = ki::lookup_function(entry);
-    if (!fn) {
-        std::fprintf(stderr, "entry %08x not recompiled\n", entry);
-        return 2;
+    if (dump_at) {
+        // --dump-at ADDR: save SRAM/DRAM and registers at the first entry of a function, then exit.
+        dump_dir = out;
+        c.watch_entry = dump_at;
+        c.on_watch = [](ki::Context& ctx) {
+            static unsigned long hits = 0;
+            if (++hits < dump_hit) return;
+            auto save = [](const std::string& path, const std::vector<uint8_t>& data) {
+                FILE* f = std::fopen(path.c_str(), "wb");
+                if (f) { std::fwrite(data.data(), 1, data.size(), f); std::fclose(f); }
+            };
+            save(dump_dir + "/dump_sram.bin", ctx.sram);
+            // Registers in the snapshot format (tools/mame_capture.py REGS), so the
+            // dump can itself be used as --boot state.
+            static const char* names[32] = {"zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2",
+                                            "t3",   "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
+                                            "s6",   "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"};
+            for (const char* fname : {"/dump_regs.txt", "/entry_regs.txt"}) {
+                FILE* rf = std::fopen((dump_dir + fname).c_str(), "w");
+                if (!rf) continue;
+                auto put = [&](const char* n, uint64_t v) { std::fprintf(rf, "%s %016llx\n", n, static_cast<unsigned long long>(v)); };
+                for (int i = 0; i < 32; ++i) put(names[i], ctx.r[i]);
+                put("hi", ctx.hi);
+                put("lo", ctx.lo);
+                put("pc", ctx.watch_entry);
+                for (int i = 0; i < 32; ++i) put(("fpr" + std::to_string(i)).c_str(), ctx.f[i]);
+                put("ccr31", ctx.fcsr);
+                put("sr", ctx.cp0[ki::kCp0Status]);
+                put("cause", ki::mfc0(ctx, ki::kCp0Cause, 0));
+                put("epc", ctx.cp0[ki::kCp0Epc]);
+                put("count", ki::mfc0(ctx, ki::kCp0Count, 0));
+                put("compare", ctx.cp0[ki::kCp0Compare]);
+                std::fclose(rf);
+            }
+            save(dump_dir + "/entry_sram.bin", ctx.sram);
+            save(dump_dir + "/entry_dram.bin", ctx.dram);
+            if (FILE* sf = std::fopen((dump_dir + "/screen.json").c_str(), "w")) {
+                std::fprintf(sf, "{\"to_vblank_ns\": %llu}\n",
+                             static_cast<unsigned long long>((board.next_event(ctx) - ctx.cycles) * 10));
+                std::fclose(sf);
+            }
+            if (!call_log.empty()) {
+                FILE* f = std::fopen((dump_dir + "/calls.txt").c_str(), "w");
+                for (uint32_t a : call_log) std::fprintf(f, "%08x\n", a);
+                std::fclose(f);
+            }
+            save(dump_dir + "/dump_dram.bin", ctx.dram);
+            std::printf("dumped at %08x after %llu cycles\n", ctx.watch_entry, static_cast<unsigned long long>(ctx.cycles));
+            std::exit(0);
+        };
     }
-    try {
-        fn(c);
-        std::printf("entry function returned (unexpected)\n");
-    } catch (const ki::GuestFault& f) {
-        std::printf("guest fault %d at pc=%08x addr=%08x after %llu cycles (frame ~%llu)\n", static_cast<int>(f.fault),
-                    f.pc, f.addr, static_cast<unsigned long long>(c.cycles),
-                    static_cast<unsigned long long>(c.cycles / ki::KinstBoard::kCyclesPerFrame));
-        for (int i = 0; i < 32; i += 4)
-            std::printf("  %-4s %016llx  %-4s %016llx  %-4s %016llx  %-4s %016llx\n", kGpr[i],
-                        static_cast<unsigned long long>(c.r[i]), kGpr[i + 1], static_cast<unsigned long long>(c.r[i + 1]),
-                        kGpr[i + 2], static_cast<unsigned long long>(c.r[i + 2]), kGpr[i + 3],
-                        static_cast<unsigned long long>(c.r[i + 3]));
+    if (call_log_from == 0) c.call_log = &call_log;
+    static FILE* trace_file = nullptr;
+    static uint64_t traced = 0;
+    if (!trace_path.empty()) {
+        // Requires ki_run_trace (code generated with --trace): one PC per line, like MAME's trace.
+        trace_file = std::fopen(trace_path.c_str(), "w");
+        c.trace_fn = [](ki::Context&, uint32_t pc) {
+            std::fprintf(trace_file, "%08X\n", pc);
+            if (++traced >= trace_max) {
+                std::fclose(trace_file);
+                std::exit(0);
+            }
+        };
+    }
+    ki::schedule(c);
+    if (!ki::run_entry(c, entry)) {
         std::printf("  dram 0x88100000:");
         for (int i = 0; i < 16; ++i) std::printf(" %02x", c.dram[0x100000 + i]);
         std::printf("\n");

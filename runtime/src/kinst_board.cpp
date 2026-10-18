@@ -2,13 +2,15 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <utility>
 
 namespace ki {
 
 namespace {
-constexpr uint8_t kDrdy = 0x40, kDsc = 0x10, kDrq = 0x08, kErr = 0x01;
+constexpr uint8_t kBsy = 0x80, kDrdy = 0x40, kDsc = 0x10, kDrq = 0x08, kErr = 0x01;
 constexpr int kCylinders = 419, kHeads = 13, kSectors = 47;  // ST9150AG
+constexpr uint64_t kUsec = 100;  // CPU cycles per microsecond (100 MHz)
 }  // namespace
 
 KinstBoard::KinstBoard(std::vector<uint8_t> disk, std::vector<uint8_t> boot_rom)
@@ -21,14 +23,48 @@ KinstBoard::KinstBoard(std::vector<uint8_t> disk, std::vector<uint8_t> boot_rom)
 
 uint32_t KinstBoard::interrupt_lines(Context& c) {
     uint32_t lines = 0;
-    if (c.cycles % kCyclesPerFrame >= kVblankStart) lines |= 0x400;  // Int0: VBLANK (screen_vblank)
+    if ((c.cycles + phase_) % kCyclesPerFrame >= kVblankStart) lines |= 0x400;  // Int0: VBLANK (screen_vblank)
     if (irq_) lines |= 0x800;                                        // Int1: IDE
     return lines;
 }
 
-uint64_t KinstBoard::next_event(Context&) { return next_vblank_; }
+void KinstBoard::set_cycles_to_vblank(uint64_t cycles) {
+    cycles %= kCyclesPerFrame;
+    phase_ = (kVblankStart + kCyclesPerFrame - cycles) % kCyclesPerFrame;  // frame position at cycle 0
+    next_vblank_ = cycles ? cycles : kCyclesPerFrame;
+}
+
+uint64_t KinstBoard::next_event(Context&) {
+    return pending_ != Pending::None && busy_until_ < next_vblank_ ? busy_until_ : next_vblank_;
+}
+
+void KinstBoard::start_busy(uint64_t cycles, Pending what) {
+    status_ = kBsy | kDsc;
+    pending_ = what;
+    busy_until_ = now_ + cycles;
+}
+
+void KinstBoard::complete_pending() {
+    Pending what = pending_;
+    pending_ = Pending::None;
+    switch (what) {
+        case Pending::Command:
+            status_ = (status_ & ~kBsy) | kDrdy;
+            if (xfer_ == Xfer::Read) status_ |= kDrq;
+            irq_ = true;
+            break;
+        case Pending::ReadSector: ide_load_sector(); break;
+        case Pending::WriteDone:
+            irq_ = true;
+            status_ = xfer_ == Xfer::Write ? (kDrdy | kDsc | kDrq) : (kDrdy | kDsc);
+            break;
+        case Pending::None: break;
+    }
+}
 
 void KinstBoard::update(Context& c) {
+    now_ = c.cycles;
+    if (pending_ != Pending::None && c.cycles >= busy_until_) complete_pending();
     while (c.cycles >= next_vblank_) {
         ++frame_;
         next_vblank_ += kCyclesPerFrame;
@@ -77,7 +113,19 @@ void KinstBoard::write(Context& c, uint32_t phys, int size, uint64_t value) {
     reg32_write(c, phys & ~3u, static_cast<uint32_t>(value << shift), mask);
 }
 
-uint32_t KinstBoard::reg32_read(Context&, uint32_t a) {
+std::vector<std::pair<uint32_t, uint64_t>> KinstBoard::io_histogram() const {
+    std::vector<std::pair<uint32_t, uint64_t>> out;
+    for (uint32_t i = 0; i < io_reads_.size(); ++i) {
+        if (io_reads_[i]) out.emplace_back(0x10000000u + i, io_reads_[i]);
+        if (io_writes_[i]) out.emplace_back(0x90000000u + i, io_writes_[i]);  // bit 31: write
+    }
+    return out;
+}
+
+uint32_t KinstBoard::reg32_read(Context& c, uint32_t a) {
+    now_ = c.cycles;
+    if (pending_ != Pending::None && now_ >= busy_until_) complete_pending();
+    if (io_histogram_on && a - 0x10000000u < io_reads_.size()) ++io_reads_[a - 0x10000000u];
     switch (a) {
         case 0x10000080: return p1;
         case 0x10000088: return p2;
@@ -95,7 +143,10 @@ uint32_t KinstBoard::reg32_read(Context&, uint32_t a) {
     return 0xffffffff;  // unmap_value_high
 }
 
-void KinstBoard::reg32_write(Context&, uint32_t a, uint32_t data, uint32_t mask) {
+void KinstBoard::reg32_write(Context& c, uint32_t a, uint32_t data, uint32_t mask) {
+    now_ = c.cycles;
+    if (pending_ != Pending::None && now_ >= busy_until_) complete_pending();
+    if (io_histogram_on && a - 0x10000000u < io_writes_.size()) ++io_writes_[a - 0x10000000u];
     auto combine = [&](uint32_t& reg) { reg = (reg & ~mask) | (data & mask); };
     switch (a) {
         case 0x10000080: combine(vram_control_); return;
@@ -116,26 +167,53 @@ void KinstBoard::reg32_write(Context&, uint32_t a, uint32_t data, uint32_t mask)
 // ---- IDE -----------------------------------------------------------------------
 
 void KinstBoard::build_identify() {
+    // Same words as MAME: device_ata_mass_storage_device_interface::
+    // ide_build_identify_device() (atastorage.cpp) for this geometry, then the
+    // patches of kinst_state::machine_reset(). The game checks this data while
+    // loading a fight and hangs on the VS screen if it does not match.
     uint16_t* w = identify_;
-    w[0] = 0x0040;  // fixed disk
+    auto ident = [&](int word, int count, const char* text) {  // device_ata_hle_interface::identify()
+        size_t len = std::strlen(text), p = 0;
+        for (int i = 0; i < count; ++i) {
+            uint16_t hi = p < len ? static_cast<uint8_t>(text[p++]) : ' ';
+            uint16_t lo = p < len ? static_cast<uint8_t>(text[p++]) : ' ';
+            w[word + i] = static_cast<uint16_t>(hi << 8 | lo);
+        }
+    };
+    uint32_t total = kCylinders * kHeads * kSectors;
+    w[0] = 0x045a;
     w[1] = kCylinders;
     w[3] = kHeads;
     w[6] = kSectors;
-    // MAME machine_reset: serial number all '0', model field spaces with the
-    // drive model the game checks ("ST9150AG") at word 27 (m_hdd_serial_offset).
+    ident(10, 10, "00000000000000000000");
+    w[22] = 4;
+    ident(23, 4, "1.0");
+    ident(27, 20, "MAME    Virtual Hard Disk");
+    w[47] = 0x8010;
+    w[49] = 0x0f03;
+    w[51] = 2;
+    w[52] = 2;
+    w[53] = 3;
+    w[54] = kCylinders;
+    w[55] = kHeads;
+    w[56] = kSectors;
+    w[57] = static_cast<uint16_t>(total);
+    w[58] = static_cast<uint16_t>(total >> 16);
+    w[60] = static_cast<uint16_t>(total);
+    w[61] = static_cast<uint16_t>(total >> 16);
+    w[62] = 0x0007;
+    w[63] = 0x0407;
+    w[64] = 0x0003;
+    w[65] = 0x78;
+    w[66] = 0x78;
+    w[67] = 0x014d;
+    w[68] = 0x78;
+    // kinst_state::machine_reset(): serial all '0', model field blank with the
+    // drive model at word 27 (m_hdd_serial_offset for KI 1).
     for (int i = 10; i < 20; ++i) w[i] = ('0' << 8) | '0';
     for (int i = 27; i < 47; ++i) w[i] = (' ' << 8) | ' ';
     const char model[] = "ST9150AG";
     for (int i = 0; i < 4; ++i) w[27 + i] = static_cast<uint16_t>(model[i * 2] << 8 | model[i * 2 + 1]);
-    w[47] = 0x8001;
-    w[49] = 0x0200;  // LBA supported
-    w[53] = 0x0001;
-    w[54] = kCylinders;
-    w[55] = kHeads;
-    w[56] = kSectors;
-    uint32_t total = kCylinders * kHeads * kSectors;
-    w[57] = w[60] = static_cast<uint16_t>(total);
-    w[58] = w[61] = static_cast<uint16_t>(total >> 16);
 }
 
 void KinstBoard::ide_reset() {
@@ -173,18 +251,15 @@ void KinstBoard::ide_finish_write_sector() {
     ++stats.sectors_written;
     ++lba_;
     buffer_pos_ = 0;
-    irq_ = true;
-    if (--sectors_left_ == 0) {
-        xfer_ = Xfer::None;
-        status_ = kDrdy | kDsc;
-    }
+    if (--sectors_left_ == 0) xfer_ = Xfer::None;
+    start_busy(kUsec * 100, Pending::WriteDone);
 }
 
 void KinstBoard::ide_command(uint8_t cmd) {
     static const bool trace = std::getenv("KI_TRACE_IDE") != nullptr;
     if (trace)
-        std::fprintf(stderr, "[ide] cmd %02x sel %02x nsect %u sector %u cyl %u -> lba %u\n", cmd, select_, nsect_,
-                     sector_, hcyl_ << 8 | lcyl_, ide_lba());
+        std::fprintf(stderr, "[ide] cmd %02x sel %02x nsect %u sector %u cyl %u -> lba %u  frame %llu\n", cmd, select_,
+                     nsect_, sector_, hcyl_ << 8 | lcyl_, ide_lba(), static_cast<unsigned long long>(frame_));
     ++stats.ide_commands;
     stats.last_ide_command = cmd;
     err_ = 0;
@@ -198,15 +273,21 @@ void KinstBoard::ide_command(uint8_t cmd) {
             buffer_pos_ = 0;
             xfer_ = Xfer::Read;
             sectors_left_ = 1;
-            status_ = kDrdy | kDsc | kDrq;
-            irq_ = true;
+            start_busy(kUsec * 10, Pending::Command);
             return;
-        case 0x20: case 0x21: case 0xc4:  // READ SECTORS / READ MULTIPLE
+        case 0x20: case 0x21: case 0xc4: {  // READ SECTORS / READ MULTIPLE
             lba_ = ide_lba();
             sectors_left_ = nsect_ ? nsect_ : 256;
             xfer_ = Xfer::Read;
-            ide_load_sector();
+            uint32_t per_cyl = logical_heads_ * logical_spt_;
+            uint32_t cyl = per_cyl ? lba_ / per_cyl : 0;
+            uint32_t diff = cyl > cur_cylinder_ ? cyl - cur_cylinder_ : cur_cylinder_ - cyl;
+            cur_cylinder_ = cyl;
+            uint64_t seek = diff == 0 ? kUsec * 4 / 10
+                                      : kUsec * 13000 * diff / kCylinders + kUsec * 1300;
+            start_busy(seek, Pending::ReadSector);
             return;
+        }
         case 0x30: case 0x31: case 0xc5:  // WRITE SECTORS / WRITE MULTIPLE
             lba_ = ide_lba();
             sectors_left_ = nsect_ ? nsect_ : 256;
@@ -217,12 +298,12 @@ void KinstBoard::ide_command(uint8_t cmd) {
         case 0x91:  // INITIALIZE DEVICE PARAMETERS: logical geometry for CHS
             logical_spt_ = nsect_ ? nsect_ : 256;
             logical_heads_ = (select_ & 0xf) + 1u;
-            status_ = kDrdy | kDsc;
-            irq_ = true;
+            xfer_ = Xfer::None;
+            start_busy(kUsec * 10, Pending::Command);
             return;
         case 0x10: case 0xef: case 0xc6: case 0xe0: case 0xe1: case 0xe5: case 0x70:
-            status_ = kDrdy | kDsc;  // recalibrate, init params, set features, power, seek: complete now
-            irq_ = true;
+            xfer_ = Xfer::None;  // recalibrate, set features, power, seek
+            start_busy(kUsec * 10, Pending::Command);
             return;
         default:
             std::fprintf(stderr, "[ide] unsupported command %02x\n", cmd);
@@ -244,7 +325,8 @@ uint16_t KinstBoard::ide_read(int reg, bool status_clears_irq) {
                     status_ = kDrdy | kDsc;
                 } else {
                     ++lba_;
-                    ide_load_sector();
+                    irq_ = false;
+                    start_busy(kUsec * 4 / 10, Pending::ReadSector);
                 }
             }
             return v;

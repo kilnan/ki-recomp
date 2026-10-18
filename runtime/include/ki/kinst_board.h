@@ -26,6 +26,11 @@ public:
     uint64_t read(Context& c, uint32_t phys, int size) override;
     void write(Context& c, uint32_t phys, int size, uint64_t value) override;
     uint32_t interrupt_lines(Context& c) override;
+    // For starts from a mid-game snapshot: cycles from cycle 0 to the next VBLANK start.
+    void set_cycles_to_vblank(uint64_t cycles);
+    // For starts from a mid-game snapshot: the logical CHS geometry the game set at
+    // boot with INITIALIZE DEVICE PARAMETERS (KI 1: 14 heads x 40 sectors).
+    void set_logical_geometry(uint32_t heads, uint32_t spt) { logical_heads_ = heads; logical_spt_ = spt; }
     uint64_t next_event(Context& c) override;
     void update(Context& c) override;
 
@@ -37,6 +42,9 @@ public:
     // Inputs (active low, all released = 0xffffffff), see kinst.cpp ports.
     uint32_t p1 = 0xffffffff, p2 = 0xffffffff, dsw = 0xffffffff;
 
+    // Optional I/O access histogram (address -> count), enabled by io_histogram_on.
+    bool io_histogram_on = false;
+    std::vector<std::pair<uint32_t, uint64_t>> io_histogram() const;
     struct Stats {
         uint64_t ide_commands = 0, sectors_read = 0, sectors_written = 0, sound_writes = 0;
         uint32_t last_ide_command = 0, unknown_io = 0;
@@ -57,7 +65,8 @@ private:
     void build_identify();
 
     std::vector<uint8_t> disk_, rom_;
-    uint64_t frame_ = 0, next_vblank_ = kVblankStart;
+    std::vector<uint64_t> io_reads_ = std::vector<uint64_t>(0x200), io_writes_ = std::vector<uint64_t>(0x200);
+    uint64_t frame_ = 0, next_vblank_ = kVblankStart, phase_ = 0;
     uint32_t vram_control_ = 0, sound_control_ = 0, sound_data_ = 0, sound_reset_ = 0;
 
     uint8_t err_ = 0, features_ = 0, nsect_ = 0, sector_ = 0, lcyl_ = 0, hcyl_ = 0, select_ = 0;
@@ -65,6 +74,16 @@ private:
     // Logical geometry for CHS addressing, set by INITIALIZE DEVICE PARAMETERS
     // (0x91) like MAME's set_geometry(); the game sets 14 heads x 40 sectors.
     uint32_t logical_heads_ = 13, logical_spt_ = 47;
+    // Command timing (MAME atastorage.cpp / atahle.cpp): the drive is busy
+    // until busy_until_, then completes `pending_`. Seek = 13 ms full stroke
+    // scaled by cylinder distance + 1.3 ms rotational latency; next sector of
+    // a multi-sector read 400 ns; sector write 100 us; other commands 10 us.
+    enum class Pending { None, Command, ReadSector, WriteDone } pending_ = Pending::None;
+    uint64_t busy_until_ = 0;
+    uint32_t cur_cylinder_ = 0;
+    uint64_t now_ = 0;  // ctx.cycles at the last access
+    void start_busy(uint64_t cycles, Pending what);
+    void complete_pending();
     bool irq_ = false;
     enum class Xfer { None, Read, Write } xfer_ = Xfer::None;
     uint32_t lba_ = 0, sectors_left_ = 0;

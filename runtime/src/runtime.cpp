@@ -19,6 +19,15 @@ RecompFunc lookup_function(uint32_t vaddr) {
 void call_indirect(Context& c, uint32_t target, uint32_t pc) {
     if (RecompFunc fn = lookup_function(target)) {
         fn(c);
+        drain(c);
+        return;
+    }
+    raise_fault(c, Fault::Unimplemented, pc, target);
+}
+
+void tail_indirect(Context& c, uint32_t target, uint32_t pc) {
+    if (RecompFunc fn = lookup_function(target)) {
+        c.tail_fn = fn;
         return;
     }
     raise_fault(c, Fault::Unimplemented, pc, target);
@@ -192,6 +201,7 @@ void schedule(Context& c) {
 }
 
 static void take_interrupt(Context& c, uint32_t pc) {
+    ++c.interrupts_taken;
     uint32_t sr = lo32(c.cp0[kCp0Status]);
     c.cp0[kCp0Epc] = sx32(pc);  // approximate: the safe point, not the exact instruction
     c.cp0[kCp0Cause] = (c.cp0[kCp0Cause] & ~0x7cull);  // ExcCode 0 = interrupt
@@ -199,11 +209,19 @@ static void take_interrupt(Context& c, uint32_t pc) {
     // The SRAM vector stub: save sp in the zero page, enter the handler.
     store<uint64_t>(c, 0x1f0u, c.r[29], pc);
     c.r[29] = sx32(kExceptionHandler);
-    if (RecompFunc fn = lookup_function(kExceptionHandler)) fn(c);
-    else raise_fault(c, Fault::Unimplemented, pc, kExceptionHandler);
+    RecompFunc saved_tail = c.tail_fn;  // normally null at a safe point
+    c.tail_fn = nullptr;
+    if (RecompFunc fn = lookup_function(kExceptionHandler)) {
+        fn(c);
+        drain(c);
+    } else {
+        raise_fault(c, Fault::Unimplemented, pc, kExceptionHandler);
+    }
+    c.tail_fn = saved_tail;
 }
 
 void service(Context& c, uint32_t pc) {
+    c.recent_service_pc[c.recent_service_pos++ & 63] = pc;
     if (c.io && c.cycles >= c.io->next_event(c)) c.io->update(c);
     // Timer: did Count become equal to Compare since the last check?
     uint32_t now = count_now(c), elapsed = now - c.last_count;
