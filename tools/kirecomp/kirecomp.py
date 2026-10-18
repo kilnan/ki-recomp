@@ -115,6 +115,7 @@ CONDITIONAL_BRANCHES = {
     "beql", "bnel", "blezl", "bgtzl", "bltzl", "bgezl", "bltzall", "bgezall",
     "bc1f", "bc1t", "bc1fl", "bc1tl",
 }
+LINK_BRANCHES = {"bltzal", "bgezal", "bltzall", "bgezall"}
 LIKELY = {"beql", "bnel", "blezl", "bgtzl", "bltzl", "bgezl", "bltzall", "bgezall", "bc1fl", "bc1tl"}
 JUMPS = {"j", "jal", "jr", "jalr"}
 
@@ -480,10 +481,13 @@ class Translator:
         # goto", and `jr $ra` dispatches over those return sites, falling back
         # to a C++ return for the external caller. The guest's own stack in
         # memory then carries the nesting, so the host stack stays flat.
-        local_calls = [i for i in insns if i.name == "jal" and i.jump_target in addrs]
+        # Branch-and-link (`bgezal`/`bltzal`) is a conditional call; the background
+        # tile renderer at 0x88030c78 calls subroutines of its own function that way.
+        local_calls = [i for i in insns if (i.name == "jal" and i.jump_target in addrs)
+                       or (i.name in LINK_BRANCHES and i.branch_target in addrs)]
         return_sites = sorted({i.vaddr + 8 for i in local_calls if i.vaddr + 8 in addrs})
         for i in local_calls:
-            targets.add(i.jump_target)
+            targets.add(i.jump_target if i.name == "jal" else i.branch_target)
         targets.update(return_sites)
         # Bounds from control-flow tracing can include code below the entry
         # point (loops jumping back before it); execution must still start at
@@ -594,8 +598,13 @@ class Translator:
             flush()
             if i.name in CONDITIONAL_BRANCHES:
                 t = i.branch_target
-                go = go_to(t, i.vaddr) if t in addrs else f"{{ {self.tail(t, i.vaddr)} return; }}"
-                link = i.name in ("bltzal", "bgezal", "bltzall", "bgezall")
+                link = i.name in LINK_BRANCHES
+                if t in addrs:
+                    go = go_to(t, i.vaddr)
+                elif link:
+                    go = f"{{ {self.call(t, i.vaddr)} }}"  # conditional call; execution continues after it
+                else:
+                    go = f"{{ {self.tail(t, i.vaddr)} return; }}"
                 emit(f"br = {self.branch_cond(i)};", i)
                 if link:
                     emit(f"c.r[31] = ki::sx32({ret});")

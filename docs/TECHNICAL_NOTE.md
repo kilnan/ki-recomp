@@ -442,7 +442,14 @@ Fixes, all general:
   - cases outside a function become entry points;
   - leading unused jump-table slots are skipped;
   - unresolved computed jumps (into unrolled code) do not end a function;
-  - code pointers built with `lui`/`addiu` are entry points.
+  - code pointers built with `lui`/`addiu` are entry points;
+  - branch-and-link (`bgezal`/`bltzal`) is a conditional call. The background
+    tile renderer (0x88030c78) calls subroutines of its own function that way;
+    translated as a plain branch, their `jr $ra` left the whole renderer, so the
+    fight stage was never drawn and fighters left trails. Found by comparing the
+    set of PCs executed in one frame (MAME `trace` vs `ki_run_trace`) from the
+    same snapshot: 180 instructions ran only in MAME. After the fix the frame's
+    back buffer differs in 276 pixels instead of 46,648.
 
 Pitfalls of MAME as an oracle (in addition to §4):
 - **Memory snapshots are a little late.** With the DRC and `-debugger none`,
@@ -461,7 +468,10 @@ Still open:
 - **Timing.** Timing is approximate (1 cycle per instruction). The game measures
   frame time with Count and adapts.
 - **Graphics fidelity.** Long sessions are not yet compared frame by frame with
-  MAME; the fight stage looked plausible but was not compared.
+  MAME. Single frames from mid-fight snapshots match except for a few hundred
+  pixels (snapshot timing, see above).
+- **Memory write taps** do not see DRC writes to RAM (fast RAM bypasses the
+  handlers), so "who wrote this pixel" needs a trace instead.
 
 ## 8. Open questions
 
