@@ -8,12 +8,13 @@ legitimately have overwritten data by then (code should match exactly).
 """
 import shutil
 import struct
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+import mame_run  # noqa: E402
 FRAMES = 900  # ~15 s emulated; the game is entered after ~6 s
 
 LUA = """
@@ -42,11 +43,11 @@ def main() -> int:
         wd = Path(td)
         dump = wd / "dram.bin"
         (wd / "dump.lua").write_text(LUA.format(frames=FRAMES, out=dump))
-        subprocess.run([shutil.which("mame") or "mame", "kinst", "-rompath", ";".join(rompath),
+        mame_run.run([shutil.which("mame") or "mame", "kinst", "-rompath", ";".join(rompath),
                         "-video", "none", "-sound", "none", "-nothrottle", "-skip_gameinfo",
                         "-nvram_directory", str(wd / "nvram"), "-diff_directory", str(wd / "diff"),
                         "-cfg_directory", str(wd / "cfg"), "-autoboot_script", str(wd / "dump.lua")],
-                       cwd=wd, capture_output=True, check=False)
+                     wd, 300)
         dram = dump.read_bytes()
     ok = True
     for addr_file in sorted((ROOT / "data/kipack-out").glob("rom-*.addr")):

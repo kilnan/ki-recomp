@@ -7,7 +7,42 @@ with the original instructions and the generated C++ is written to `poc/out/REPO
 - Game revision: Killer Instinct, MAME set `kinst`, BIOS `v1.5d`, U98 `ki-l15d.u98` (SHA1 607394d4ba1713f38c2cb5159303cace9cde991e)
 - Code image: `rom-0` unpacked from U98, loaded at 0x88000000, SHA1 ed875b9f2a0d1bccf79ff63189c37488ee718659
 - Reference: MAME 0.289 (Homebrew), original boot ROM + game code, captures via debugger breakpoints
-- Comparison: all 32 GPRs (64-bit), HI, LO, return address, and every byte of SRAM (512 KiB) and DRAM (8 MiB)
+- Comparison: all 32 GPRs (64-bit), HI, LO, the low 32 bits of the 32 FPRs and FCSR (captures that include
+  COP1 state), return address, and every byte of SRAM (512 KiB) and DRAM (8 MiB)
+
+## Function 0x880176f0
+
+single-precision FPU: reads two 2-D vectors from globals at 0x88035e30, computes the signed distance of a point from a line (mul/add/sub/div.s, c.eq.s/c.lt.s with bc1t/bc1f, sqrt.s, neg.s, cvt.w.s) and stores it, scaled, to a global. Leaf, 8-byte stack frame.
+
+Bounds: 0x880176f0-0x880177b8 (exclusive), 50 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+| fpu-76f0-1 | real game call, real disk | drc | a0=11e0 a1=1 a2=11e0 ra=88016950 | ffffffff80058000 | ffffffff80058000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B) | PASS |
+| fpu-76f0-5 | real game call, real disk | drc | a0=11e0 a1=1 a2=11e0 ra=88016950 | ffffffff80058000 | ffffffff80058000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B) | PASS |
+| fpu-76f0-8 | real game call, real disk | drc | a0=11e0 a1=4 a2=4780 ra=88016950 | ffffffff80030000 | ffffffff80030000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B), dram 0x8808e008-0x8808e008 (1 B) | PASS |
+| syn-fpu-76f0-neg | synthetic (inputs injected), real disk | drc | a0=11e0 a1=1 a2=11e0 ra=88016950 | ffffffff80058000 | ffffffff80058000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B), dram 0x8808e008-0x8808e00b (4 B) | PASS |
+| syn-fpu-76f0-random1 | synthetic (inputs injected), real disk | drc | a0=11e0 a1=1 a2=11e0 ra=88016950 | ffffffff80058000 | ffffffff80058000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B), dram 0x8808e008-0x8808e00a (3 B) | PASS |
+| syn-fpu-76f0-random2 | synthetic (inputs injected), real disk | drc | a0=11e0 a1=1 a2=11e0 ra=88016950 | ffffffff80058000 | ffffffff80058000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B), dram 0x8808e008-0x8808e00b (4 B) | PASS |
+| syn-fpu-76f0-zero | synthetic (inputs injected), real disk | drc | a0=11e0 a1=1 a2=11e0 ra=88016950 | ffffffff80058000 | ffffffff80058000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B), dram 0x8808e009-0x8808e009 (1 B) | PASS |
+
+## Function 0x8801a1e8
+
+single-precision FPU: from two integer points (v0,v1) and (a0,a1) computes the distance and the scaled unit vector, returned as integers in f0..f2 (cvt.s.w, sqrt.s, c.olt.s/bc1t, div.s, cvt.w.s); points closer than a threshold return f0 = 0. Leaf, no stack.
+
+Bounds: 0x8801a1e8-0x8801a27c (exclusive), 37 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+| fpu-a1e8-first | real game call, real disk | drc | a0=18400 a1=10c00 a2=0 ra=88000880 | c400 | c400 | at | none | PASS |
+| fpu-a1e8-h1500 | real game call, real disk | drc | a0=100f a1=10c00 a2=0 ra=88000880 | 6107 | 6107 | at | none | PASS |
+| fpu-a1e8-h300 | real game call, real disk | drc | a0=99cf a1=10c00 a2=0 ra=88000880 | 4c65 | 4c65 | at | none | PASS |
+| fpu-a1e8-neg | real game call, real disk | drc | a0=fffffffffffffe5b a1=10c00 a2=0 ra=88000880 | ffffffffffffbfd5 | ffffffffffffbfd5 | at | none | PASS |
+| fpu-a1e8-zero | real game call, real disk | drc | a0=ffffffffffff8000 a1=10c00 a2=0 ra=88000880 | ffffffffffff8000 | ffffffffffff8000 | at | none | PASS |
 
 ## Function 0x8802d560
 
@@ -19,21 +54,36 @@ Bounds: 0x8802d560-0x8802d5b0 (exclusive), 20 instructions, found by the transla
 
 | case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
 |---|---|---|---|---|---|---|---|---|
-| real-ec44-1 | real game call | drc | a0=ffffffff88500000 a1=1f8 a2=0 ra=8802ec44 | 2a7c1aa7 | 2a7c1aa7 | v0, v1, a0, a3, t0, t1 | none | PASS |
-| real-ec44-2 | real game call | drc | a0=ffffffff88500e00 a1=1f8 a2=0 ra=8802ec44 | 2a7c1aa7 | 2a7c1aa7 | v0, v1, a0, a3, t0, t1 | none | PASS |
-| real-ecec-1 | real game call | drc | a0=ffffffff88500200 a1=200 a2=ffffffffffffffff ra=8802ecec | cee2a98e | cee2a98e | v0, v1, a0, t0, t1 | none | PASS |
-| real-ecec-3 | real game call | drc | a0=ffffffff88500600 a1=200 a2=ffffffffffffffff ra=8802ecec | 43dcb560 | 43dcb560 | v0, v1, a0, t0, t1 | none | PASS |
-| real-ecec-3-interp | real game call | interpreter | a0=ffffffff88500600 a1=200 a2=ffffffffffffffff ra=8802ecec | 43dcb560 | 43dcb560 | v0, v1, a0, t0, t1 | none | PASS |
-| real-ed20-1 | real game call | drc | a0=ffffffff88500000 a1=1f8 a2=ffffffffffffffff ra=8802ed20 | b58397c4 | b58397c4 | v0, v1, a0, t0, t1 | none | PASS |
-| real-ed20-1-interp | real game call | interpreter | a0=ffffffff88500000 a1=1f8 a2=ffffffffffffffff ra=8802ed20 | b58397c4 | b58397c4 | v0, v1, a0, t0, t1 | none | PASS |
-| real-ed20-2 | real game call | drc | a0=ffffffff88500c00 a1=1f8 a2=ffffffffffffffff ra=8802ed20 | b58397c4 | b58397c4 | v0, v1, a0, t0, t1 | none | PASS |
-| real-f104-1 | real game call | drc | a0=ffffffff88500400 a1=200 a2=1 ra=8802f104 | a8b48272 | a8b48272 | v0, v1, a0, a3, t0, t1 | none | PASS |
-| real-f138-1 | real game call | drc | a0=ffffffff88500000 a1=1f8 a2=1 ra=8802f138 | 5ffc03a5 | 5ffc03a5 | v0, v1, a0, t0, t1 | none | PASS |
-| real-f138-1-interp | real game call | interpreter | a0=ffffffff88500000 a1=1f8 a2=1 ra=8802f138 | 5ffc03a5 | 5ffc03a5 | v0, v1, a0, t0, t1 | none | PASS |
-| syn-len1 | synthetic (inputs injected) | interpreter | a0=ffffffff88500000 a1=1 a2=0 ra=8802ec44 | 1000 | 1000 | v0, v1, a0, a3, t0, t1 | none | PASS |
-| syn-ones777-odd | synthetic (inputs injected) | interpreter | a0=ffffffff88600003 a1=309 a2=0 ra=8802ec44 | 5661218d | 5661218d | v0, v1, a0, a3, t0, t1 | none | PASS |
-| syn-random4093 | synthetic (inputs injected) | interpreter | a0=ffffffff88600000 a1=ffd a2=0 ra=8802ec44 | 274710ac | 274710ac | v0, v1, a0, a3, t0, t1 | none | PASS |
-| syn-sram-src | synthetic (inputs injected) | interpreter | a0=ffffffff80070001 a1=200 a2=0 ra=8802ec44 | eec22c6e | eec22c6e | v0, v1, a0, a3, t0, t1 | none | PASS |
+| real-ec44-1 | real game call, blank disk | drc | a0=ffffffff88500000 a1=1f8 a2=0 ra=8802ec44 | 2a7c1aa7 | 2a7c1aa7 | v0, v1, a0, a3, t0, t1 | none | PASS |
+| real-ec44-2 | real game call, blank disk | drc | a0=ffffffff88500e00 a1=1f8 a2=0 ra=8802ec44 | 2a7c1aa7 | 2a7c1aa7 | v0, v1, a0, a3, t0, t1 | none | PASS |
+| real-ecec-1 | real game call, blank disk | drc | a0=ffffffff88500200 a1=200 a2=ffffffffffffffff ra=8802ecec | cee2a98e | cee2a98e | v0, v1, a0, t0, t1 | none | PASS |
+| real-ecec-3 | real game call, blank disk | drc | a0=ffffffff88500600 a1=200 a2=ffffffffffffffff ra=8802ecec | 43dcb560 | 43dcb560 | v0, v1, a0, t0, t1 | none | PASS |
+| real-ecec-3-interp | real game call, blank disk | interpreter | a0=ffffffff88500600 a1=200 a2=ffffffffffffffff ra=8802ecec | 43dcb560 | 43dcb560 | v0, v1, a0, t0, t1 | none | PASS |
+| real-ed20-1 | real game call, blank disk | drc | a0=ffffffff88500000 a1=1f8 a2=ffffffffffffffff ra=8802ed20 | b58397c4 | b58397c4 | v0, v1, a0, t0, t1 | none | PASS |
+| real-ed20-1-interp | real game call, blank disk | interpreter | a0=ffffffff88500000 a1=1f8 a2=ffffffffffffffff ra=8802ed20 | b58397c4 | b58397c4 | v0, v1, a0, t0, t1 | none | PASS |
+| real-ed20-2 | real game call, blank disk | drc | a0=ffffffff88500c00 a1=1f8 a2=ffffffffffffffff ra=8802ed20 | b58397c4 | b58397c4 | v0, v1, a0, t0, t1 | none | PASS |
+| real-f104-1 | real game call, blank disk | drc | a0=ffffffff88500400 a1=200 a2=1 ra=8802f104 | a8b48272 | a8b48272 | v0, v1, a0, a3, t0, t1 | none | PASS |
+| real-f138-1 | real game call, blank disk | drc | a0=ffffffff88500000 a1=1f8 a2=1 ra=8802f138 | 5ffc03a5 | 5ffc03a5 | v0, v1, a0, t0, t1 | none | PASS |
+| real-f138-1-interp | real game call, blank disk | interpreter | a0=ffffffff88500000 a1=1f8 a2=1 ra=8802f138 | 5ffc03a5 | 5ffc03a5 | v0, v1, a0, t0, t1 | none | PASS |
+| syn-len1 | synthetic (inputs injected), blank disk | interpreter | a0=ffffffff88500000 a1=1 a2=0 ra=8802ec44 | 1000 | 1000 | v0, v1, a0, a3, t0, t1 | none | PASS |
+| syn-ones777-odd | synthetic (inputs injected), blank disk | interpreter | a0=ffffffff88600003 a1=309 a2=0 ra=8802ec44 | 5661218d | 5661218d | v0, v1, a0, a3, t0, t1 | none | PASS |
+| syn-random4093 | synthetic (inputs injected), blank disk | interpreter | a0=ffffffff88600000 a1=ffd a2=0 ra=8802ec44 | 274710ac | 274710ac | v0, v1, a0, a3, t0, t1 | none | PASS |
+| syn-sram-src | synthetic (inputs injected), blank disk | interpreter | a0=ffffffff80070001 a1=200 a2=0 ra=8802ec44 | eec22c6e | eec22c6e | v0, v1, a0, a3, t0, t1 | none | PASS |
+
+## Function 0x8802d694
+
+fills the byte table at 0x88040e60 with 3 over [a0, a1); a loop branch targets the delay slot of the entry test (loop rotation). Leaf, no stack.
+
+Bounds: 0x8802d694-0x8802d6c4 (exclusive), 12 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+| d694-real-1 | real game call, real disk | drc | a0=0 a1=1 a2=1 ra=8802d544 | ffffffff88500000 | ffffffff88500000 | a0, t6 | dram 0x88040e60-0x88040e60 (1 B) | PASS |
+| d694-real-2 | real game call, real disk | drc | a0=6 a1=7 a2=1 ra=8802d544 | ffffffff88500200 | ffffffff88500200 | a0, t6 | dram 0x88040e66-0x88040e66 (1 B) | PASS |
+| d694-real-3 | real game call, real disk | drc | a0=2 a1=6 a2=4 ra=8802d544 | ffffffff88500400 | ffffffff88500400 | a0, t6 | dram 0x88040e62-0x88040e65 (4 B) | PASS |
+| syn-d694-empty | synthetic (inputs injected), real disk | interpreter | a0=5 a1=5 a2=1 ra=8802d544 | ffffffff88500000 | ffffffff88500000 | at | none | PASS |
 
 ## Function 0x8802d774
 
@@ -45,16 +95,16 @@ Bounds: 0x8802d774-0x8802d818 (exclusive), 41 instructions, found by the transla
 
 | case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
 |---|---|---|---|---|---|---|---|---|
-| d774-real-eba0-1 | real game call | drc | a0=2 a1=0 a2=1 ra=8802eba0 | 0 | 0 | a1, t1, t2, t3, t4, t5 | dram 0x880871f6-0x880871f7 (2 B) | PASS |
-| d774-real-eba0-3 | real game call | drc | a0=2 a1=2 a2=6 ra=8802eba0 | 0 | 0 | a1 | none | PASS |
-| d774-real-f03c-4 | real game call | drc | a0=2 a1=3 a2=4 ra=8802f03c | 0 | 0 | at, a1, t4, t5 | none | PASS |
-| d774-real-f03c-7 | real game call | drc | a0=2 a1=6 a2=7 ra=8802f03c | 1 | 1 | at, v0, a1, t2, t3, t4, t5 | dram 0x880871e4-0x880871e4 (1 B) | PASS |
-| syn-d774-a0eq1 | synthetic (inputs injected) | interpreter | a0=1 a1=0 a2=20 ra=8802eba0 | 14 | 14 | v0, a1, t0, t6, t7, t8, t9 | dram 0x880871f4-0x880871f4 (1 B), dram 0x880871f6-0x880871f7 (2 B) | PASS |
-| syn-d774-a0eq1-neg | synthetic (inputs injected) | interpreter | a0=1 a1=fffffffffffffffd a2=5 ra=8802eba0 | 8 | 8 | v0, a1, t0, t6, t7, t8 | dram 0x880871f4-0x880871f4 (1 B), dram 0x880871f6-0x880871f7 (2 B) | PASS |
-| syn-d774-a0eq2 | synthetic (inputs injected) | interpreter | a0=2 a1=0 a2=40 ra=8802eba0 | e00 | e00 | v0, a1, t1, t2, t3, t4, t5 | dram 0x880871f5-0x880871f7 (3 B) | PASS |
-| syn-d774-bigsum | synthetic (inputs injected) | interpreter | a0=2 a1=0 a2=300 ra=8802eba0 | 17d00 | 17d00 | v0, a1, t1, t2, t3, t4, t5 | dram 0x880871f5-0x880871f7 (3 B) | PASS |
-| syn-d774-empty | synthetic (inputs injected) | interpreter | a0=2 a1=5 a2=5 ra=8802eba0 | 0 | 0 |  | dram 0x880871f6-0x880871f7 (2 B) | PASS |
+| d774-real-eba0-1 | real game call, blank disk | drc | a0=2 a1=0 a2=1 ra=8802eba0 | 0 | 0 | a1, t1, t2, t3, t4, t5 | dram 0x880871f6-0x880871f7 (2 B) | PASS |
+| d774-real-eba0-3 | real game call, blank disk | drc | a0=2 a1=2 a2=6 ra=8802eba0 | 0 | 0 | a1 | none | PASS |
+| d774-real-f03c-4 | real game call, blank disk | drc | a0=2 a1=3 a2=4 ra=8802f03c | 0 | 0 | at, a1, t4, t5 | none | PASS |
+| d774-real-f03c-7 | real game call, blank disk | drc | a0=2 a1=6 a2=7 ra=8802f03c | 1 | 1 | at, v0, a1, t2, t3, t4, t5 | dram 0x880871e4-0x880871e4 (1 B) | PASS |
+| syn-d774-a0eq1 | synthetic (inputs injected), blank disk | interpreter | a0=1 a1=0 a2=20 ra=8802eba0 | 14 | 14 | v0, a1, t0, t6, t7, t8, t9 | dram 0x880871f4-0x880871f4 (1 B), dram 0x880871f6-0x880871f7 (2 B) | PASS |
+| syn-d774-a0eq1-neg | synthetic (inputs injected), blank disk | interpreter | a0=1 a1=fffffffffffffffd a2=5 ra=8802eba0 | 8 | 8 | v0, a1, t0, t6, t7, t8 | dram 0x880871f4-0x880871f4 (1 B), dram 0x880871f6-0x880871f7 (2 B) | PASS |
+| syn-d774-a0eq2 | synthetic (inputs injected), blank disk | interpreter | a0=2 a1=0 a2=40 ra=8802eba0 | e00 | e00 | v0, a1, t1, t2, t3, t4, t5 | dram 0x880871f5-0x880871f7 (3 B) | PASS |
+| syn-d774-bigsum | synthetic (inputs injected), blank disk | interpreter | a0=2 a1=0 a2=300 ra=8802eba0 | 17d00 | 17d00 | v0, a1, t1, t2, t3, t4, t5 | dram 0x880871f5-0x880871f7 (3 B) | PASS |
+| syn-d774-empty | synthetic (inputs injected), blank disk | interpreter | a0=2 a1=5 a2=5 ra=8802eba0 | 0 | 0 |  | dram 0x880871f6-0x880871f7 (2 B) | PASS |
 
 ## Summary
 
-24/24 cases match MAME exactly.
+40/40 cases match MAME exactly.

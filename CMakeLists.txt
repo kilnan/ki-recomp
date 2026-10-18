@@ -11,7 +11,7 @@ set(KI_CODE_IMAGE "${CMAKE_SOURCE_DIR}/data/kipack-out/rom-0.bin" CACHE FILEPATH
     "KI 1 L1.5D game code image (rom-0, loaded at 0x88000000)")
 set(KI_CODE_IMAGE_SHA1 "ed875b9f2a0d1bccf79ff63189c37488ee718659" CACHE STRING
     "expected SHA1 of KI_CODE_IMAGE")
-set(KI_FUNCTIONS "8802d560;8802d774" CACHE STRING "semicolon-separated guest functions to recompile")
+set(KI_FUNCTIONS "8802d560;8802d774;880176f0;8801a1e8;8802d694" CACHE STRING "semicolon-separated guest functions to recompile")
 set(KI_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python" CACHE FILEPATH "Python with rabbitizer installed")
 
 if(MSVC)

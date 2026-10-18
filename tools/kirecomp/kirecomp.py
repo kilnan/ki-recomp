@@ -59,6 +59,14 @@ class Insn:
     def imm(self): return self.word & 0xFFFF
     @property
     def simm(self): return self.imm - 0x10000 if self.imm & 0x8000 else self.imm
+    # COP1 fields
+    @property
+    def ft(self): return (self.word >> 16) & 31
+    @property
+    def fs(self): return (self.word >> 11) & 31
+    @property
+    def fd(self): return (self.word >> 6) & 31
+
     @property
     def branch_target(self): return (self.vaddr + 4 + (self.simm << 2)) & 0xFFFFFFFF
     @property
@@ -90,8 +98,9 @@ class Image:
 CONDITIONAL_BRANCHES = {
     "beq", "bne", "blez", "bgtz", "bltz", "bgez", "bltzal", "bgezal",
     "beql", "bnel", "blezl", "bgtzl", "bltzl", "bgezl", "bltzall", "bgezall",
+    "bc1f", "bc1t", "bc1fl", "bc1tl",
 }
-LIKELY = {"beql", "bnel", "blezl", "bgtzl", "bltzl", "bgezl", "bltzall", "bgezall"}
+LIKELY = {"beql", "bnel", "blezl", "bgtzl", "bltzl", "bgezl", "bltzall", "bgezall", "bc1fl", "bc1tl"}
 JUMPS = {"j", "jal", "jr", "jalr"}
 
 
@@ -99,13 +108,17 @@ def has_delay_slot(i: Insn) -> bool:
     return i.name in CONDITIONAL_BRANCHES or i.name in JUMPS
 
 
-def find_function_end(img: Image, start: int, limit: int = 0x10000) -> int:
+def find_function_end(img: Image, start: int, limit: int = 0x40000, stops: frozenset = frozenset()) -> int:
     """Linear scan: the function ends after the delay slot of the first
     `jr $ra` (or out-of-function `j`) that is not skipped over by an earlier
-    forward branch inside the function. Returns the exclusive end address."""
+    forward branch inside the function. Functions that never return (e.g. a
+    main loop) end where another known function starts (`stops`), provided no
+    internal branch reaches past it. Returns the exclusive end address."""
     furthest = start
     pc = start
     while pc < start + limit:
+        if pc != start and pc in stops and pc > furthest:
+            return pc
         i = img.insn(pc)
         if i.name in CONDITIONAL_BRANCHES:
             furthest = max(furthest, i.branch_target)
@@ -258,13 +271,46 @@ class Translator:
             return f"ki::mtc0(c, {i.rd}, {rt}, {pc});"
         if n in ("tlbr", "tlbwi", "tlbwr", "tlbp", "eret"):
             return f"ki::cop0_op(c, {u32(i.word)}, {pc});"
+        fpu = self.fpu(i, addr, pc)
+        if fpu is not None:
+            return fpu
         if self.allow_unimplemented:
             return f"ki::raise_fault(c, ki::Fault::Unimplemented, {pc}); /* {n} */"
         raise TranslateError(f"{i.vaddr:08x}: unsupported instruction {n} ({i.text})")
 
+    def fpu(self, i: Insn, addr: str, pc: str) -> str | None:
+        """COP1, single precision and moves (Status.FR = 1). None if not FPU."""
+        n, ft, fs, fd, rt = i.name, i.ft, i.fs, i.fd, R(i.rt)
+        S = lambda r: f"ki::fs(c, {r})"  # noqa: E731
+        if n == "lwc1": return f"ki::set_fbits(c, {ft}, ki::load<uint32_t>(c, {addr}, {pc}));"
+        if n == "swc1": return f"ki::store<uint32_t>(c, {addr}, ki::fbits(c, {ft}), {pc});"
+        if n == "ldc1": return f"c.f[{ft}] = ki::load<uint64_t>(c, {addr}, {pc});"
+        if n == "sdc1": return f"ki::store<uint64_t>(c, {addr}, c.f[{ft}], {pc});"
+        if n == "mtc1": return f"ki::set_fbits(c, {fs}, ki::lo32({rt}));"
+        if n == "mfc1": return self.assign(i.rt, f"ki::sx32(ki::fbits(c, {fs}))")
+        if n == "dmtc1": return f"c.f[{fs}] = {rt};"
+        if n == "dmfc1": return self.assign(i.rt, f"c.f[{fs}]")
+        if n == "ctc1": return f"ki::ctc1(c, {fs}, {rt});"
+        if n == "cfc1": return self.assign(i.rt, f"ki::cfc1(c, {fs})")
+        binop = {"add_s": "+", "sub_s": "-", "mul_s": "*", "div_s": "/"}
+        if n in binop: return f"ki::set_fs(c, {fd}, {S(fs)} {binop[n]} {S(ft)});"
+        if n == "sqrt_s": return f"ki::set_fs(c, {fd}, std::sqrt({S(fs)}));"
+        if n == "abs_s": return f"ki::set_fbits(c, {fd}, ki::fbits(c, {fs}) & 0x7fffffffu);"
+        if n == "neg_s": return f"ki::set_fbits(c, {fd}, ki::fbits(c, {fs}) ^ 0x80000000u);"
+        if n == "mov_s": return f"ki::set_fbits(c, {fd}, ki::fbits(c, {fs}));"
+        if n == "cvt_s_w": return f"ki::set_fs(c, {fd}, static_cast<float>(static_cast<int32_t>(ki::fbits(c, {fs}))));"
+        if n == "cvt_w_s": return f"ki::set_fbits(c, {fd}, static_cast<uint32_t>(ki::cvt_w_s(c, {S(fs)})));"
+        if n.startswith("c_") and n.endswith("_s"):
+            return f"ki::set_fcc(c, ki::fcompare({i.word & 15}, {S(fs)}, {S(ft)}));"
+        return None
+
     # -- control flow -------------------------------------------------------
     def branch_cond(self, i: Insn) -> str:
         rs, rt = R(i.rs), R(i.rt)
+        if i.name in ("bc1f", "bc1fl"):
+            return "!ki::fcc(c)"
+        if i.name in ("bc1t", "bc1tl"):
+            return "ki::fcc(c)"
         if i.name in ("beq", "beql", "bne", "bnel") and i.rs == i.rt:  # e.g. "b" = beq $zero,$zero
             return "true" if i.name.startswith("beq") else "false"
         base = {"beql": "beq", "bnel": "bne", "blezl": "blez", "bgtzl": "bgtz", "bltzl": "bltz",
@@ -287,6 +333,15 @@ class Translator:
                 targets.add(i.branch_target)
             if i.name == "j" and fn.start <= i.jump_target < fn.end:
                 targets.add(i.jump_target)
+        # A branch may target an instruction that is also the delay slot of a
+        # preceding branch (loop rotation). Reached that way it is an ordinary
+        # instruction, so it is emitted a second time, standalone, after the
+        # branch sequence; the fall-through path jumps over that copy.
+        slot_targets = set()
+        for k, i in enumerate(insns[:-1]):
+            if has_delay_slot(i) and insns[k + 1].vaddr in targets:
+                slot_targets.add(insns[k + 1].vaddr)
+                targets.add(insns[k + 1].vaddr + 4)
         out = [f"void func_{fn.start:08x}(ki::Context& c) {{",
                f"    // guest 0x{fn.start:08x}-0x{fn.end:08x} ({len(insns)} instructions)",
                "    bool br = false;", "    (void)br;", "    (void)c;"]
@@ -309,8 +364,6 @@ class Translator:
             d = insns[idx + 1]
             if has_delay_slot(d):
                 raise TranslateError(f"{d.vaddr:08x}: control transfer in delay slot")
-            if d.vaddr in targets:
-                raise TranslateError(f"{d.vaddr:08x}: delay slot is a branch target (unsupported)")
             ret = u32(i.vaddr + 8)
             dslot = lambda: emit("    " + self.simple(d), d)  # noqa: E731
             if i.name in CONDITIONAL_BRANCHES:
@@ -359,7 +412,19 @@ class Translator:
                     emit(f"  c.r[{i.rd}] = ki::sx32({ret});")
                 dslot()
                 emit(f"  ki::call_indirect(c, tgt, {u32(i.vaddr)}); }}")
+            if d.vaddr in slot_targets:
+                if d.vaddr + 4 >= fn.end:
+                    raise TranslateError(f"{d.vaddr:08x}: branch target in the last delay slot")
+                emit(f"goto L_{d.vaddr + 4:08x};")
+                out.append(f"L_{d.vaddr:08x}:")
+                emit(self.simple(d), d)
             idx += 2
+        last = insns[-2] if len(insns) >= 2 else None
+        ends_in_transfer = last is not None and (last.name == "jr" or last.name == "j")
+        if not ends_in_transfer:
+            # Execution falls through into the next function (shared tail or a
+            # function that does not return): continue there.
+            out.append(f"    {self.call(fn.end, fn.end - 4)} return;  // fall through to 0x{fn.end:08x}")
         out.append("}")
         return "\n".join(out)
 
@@ -407,10 +472,11 @@ def main(argv: list[str]) -> int:
     if args.discover:
         explicit = {a for a, _ in specs}
         specs += [(t, None) for t in sorted(discover_jal_targets(img)) if t not in explicit]
+    stops = frozenset(discover_jal_targets(img) | {a for a, _ in specs})
     funcs, failures = [], []
     for start, end in specs:
         try:
-            end = end if end is not None else find_function_end(img, start)
+            end = end if end is not None else find_function_end(img, start, stops=stops)
             funcs.append(Function(start, end, [img.insn(a) for a in range(start, end, 4)]))
         except TranslateError as e:
             if not args.discover:

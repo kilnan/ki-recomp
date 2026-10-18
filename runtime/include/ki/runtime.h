@@ -17,6 +17,7 @@
 
 #include <bit>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -42,6 +43,11 @@ enum class Fault { AddressErrorLoad, AddressErrorStore, Overflow, Tlb, Unimpleme
 struct Context {
     uint64_t r[32] = {};
     uint64_t hi = 0, lo = 0;
+    // COP1 with Status.FR = 1 (set by the game at boot): 32 64-bit FPRs. Only
+    // single precision is used by the game; a single lives in the low 32 bits
+    // and writes leave the high half untouched (as MAME's DRC does).
+    uint64_t f[32] = {};
+    uint32_t fcsr = 0;  // FCR31: rounding mode in bits 0-1, condition bit 23
     std::vector<uint8_t> sram = std::vector<uint8_t>(kSramSize);
     std::vector<uint8_t> dram = std::vector<uint8_t>(kDramSize);
     IoHandler* io = nullptr;
@@ -178,6 +184,36 @@ void swl(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc);
 void swr(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc);
 void sdl(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc);
 void sdr(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc);
+
+// ---- coprocessor 1 (single precision) --------------------------------------
+// Host float arithmetic is IEEE-754 binary32 with no excess precision on the
+// supported targets (FLT_EVAL_METHOD == 0 on arm64 and x86-64 SSE). Do not
+// build with -ffast-math. NaN payloads may differ between host ISAs.
+
+inline uint32_t fbits(const Context& c, unsigned n) { return lo32(c.f[n]); }
+inline void set_fbits(Context& c, unsigned n, uint32_t v) { c.f[n] = (c.f[n] & 0xffffffff00000000ull) | v; }
+inline float fs(const Context& c, unsigned n) {
+    uint32_t b = fbits(c, n);
+    float v;
+    std::memcpy(&v, &b, sizeof v);
+    return v;
+}
+inline void set_fs(Context& c, unsigned n, float v) {
+    uint32_t b;
+    std::memcpy(&b, &v, sizeof b);
+    set_fbits(c, n, b);
+}
+inline bool fcc(const Context& c) { return (c.fcsr >> 23) & 1; }
+inline void set_fcc(Context& c, bool v) { c.fcsr = (c.fcsr & ~(1u << 23)) | (static_cast<uint32_t>(v) << 23); }
+// CVT.W.S rounds according to FCSR.RM, like the hardware and MAME's DRC
+// (MAME's interpreter truncates instead). NaN and out-of-range inputs, which
+// trap on the R4600, saturate here (as arm64 fcvt* does); see the note.
+int32_t cvt_w_s(const Context& c, float v);
+// C.cond.S: cond is the low 4 bits of the function field (signalling variants
+// 8-15 compare like 0-7; FP exceptions are not modelled).
+bool fcompare(unsigned cond, float a, float b);
+uint64_t cfc1(const Context& c, unsigned reg);
+void ctc1(Context& c, unsigned reg, uint64_t value);
 
 // ---- coprocessor 0 / system (not needed by the first proof; trap loudly) ---
 uint64_t mfc0(Context& c, unsigned reg, uint32_t pc);

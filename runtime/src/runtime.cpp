@@ -1,6 +1,7 @@
 #include "ki/runtime.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace ki {
 
@@ -126,6 +127,42 @@ void sdr(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc) {
     unsigned shift = 8 * k;
     uint64_t mask = ~0ull << shift;
     store<uint64_t>(c, aligned, (dword & ~mask) | (rt << shift), pc);
+}
+
+int32_t cvt_w_s(const Context& c, float v) {
+    if (std::isnan(v)) return 0;
+    double d = v, r;
+    switch (c.fcsr & 3) {
+        case 0: {  // round to nearest, ties to even
+            r = std::floor(d);
+            double diff = d - r;
+            if (diff > 0.5 || (diff == 0.5 && std::fmod(r, 2.0) != 0.0)) r += 1.0;
+            break;
+        }
+        case 1: r = std::trunc(d); break;
+        case 2: r = std::ceil(d); break;
+        default: r = std::floor(d); break;
+    }
+    if (r >= 2147483648.0) return INT32_MAX;
+    if (r < -2147483648.0) return INT32_MIN;
+    return static_cast<int32_t>(r);
+}
+
+bool fcompare(unsigned cond, float a, float b) {
+    bool unordered = std::isnan(a) || std::isnan(b);
+    bool less = !unordered && a < b;
+    bool equal = !unordered && a == b;
+    return ((cond & 1) && unordered) || ((cond & 2) && equal) || ((cond & 4) && less);
+}
+
+uint64_t cfc1(const Context& c, unsigned reg) {
+    if (reg == 31) return sx32(c.fcsr);
+    if (reg == 0) return 0x2020;  // FCR0 = PRId for the R4600 in MAME (mips3com.cpp compute_prid_register)
+    return 0;
+}
+
+void ctc1(Context& c, unsigned reg, uint64_t value) {
+    if (reg == 31) c.fcsr = lo32(value);
 }
 
 uint64_t mfc0(Context& c, unsigned reg, uint32_t pc) { raise_fault(c, Fault::Unimplemented, pc, reg); }

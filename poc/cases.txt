@@ -1,4 +1,6 @@
 # PoC capture cases (KI 1, U98 L1.5D). Format:
+# Cases marked --blank-disk were captured booting with the all-zero disk
+# (tools/make_blank_chd.sh), before the real kinst.chd was available.
 #   name  function  hit  [capture options...]
 # A case stops at the hit-th call of the function that satisfies --when
 # (a MAME debugger expression; the caller's return address identifies the
@@ -10,31 +12,61 @@
 # "syn" cases (always run with the interpreter, see tools/mame_capture.py)
 # stop at a real call and overwrite inputs first; the original
 # code still runs inside MAME, but the inputs are synthetic.
-real-ec44-1           8802d560   1  --when ra==ffffffff8802ec44
-real-ec44-2           8802d560   2  --when ra==ffffffff8802ec44
-real-ecec-1           8802d560   1  --when ra==ffffffff8802ecec
-real-ecec-3           8802d560   3  --when ra==ffffffff8802ecec
-real-ed20-1           8802d560   1  --when ra==ffffffff8802ed20
-real-ed20-2           8802d560   2  --when ra==ffffffff8802ed20
-real-f104-1           8802d560   1  --when ra==ffffffff8802f104
-real-f138-1           8802d560   1  --when ra==ffffffff8802f138
-real-ecec-3-interp    8802d560   3  --when ra==ffffffff8802ecec
-real-ed20-1-interp    8802d560   1  --when ra==ffffffff8802ed20
-real-f138-1-interp    8802d560   1  --when ra==ffffffff8802f138
-syn-len1              8802d560   1  --when ra==ffffffff8802ec44 --set a1=1
-syn-random4093        8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/random4093.bin@88600000 --set a0=ffffffff88600000 --set a1=ffd
-syn-ones777-odd       8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/ones777.bin@88600003 --set a0=ffffffff88600003 --set a1=309
-syn-sram-src          8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/random4093.bin@80070000 --set a0=ffffffff80070001 --set a1=200
+real-ec44-1           8802d560   1  --when ra==ffffffff8802ec44 --blank-disk
+real-ec44-2           8802d560   2  --when ra==ffffffff8802ec44 --blank-disk
+real-ecec-1           8802d560   1  --when ra==ffffffff8802ecec --blank-disk
+real-ecec-3           8802d560   3  --when ra==ffffffff8802ecec --blank-disk
+real-ed20-1           8802d560   1  --when ra==ffffffff8802ed20 --blank-disk
+real-ed20-2           8802d560   2  --when ra==ffffffff8802ed20 --blank-disk
+real-f104-1           8802d560   1  --when ra==ffffffff8802f104 --blank-disk
+real-f138-1           8802d560   1  --when ra==ffffffff8802f138 --blank-disk
+real-ecec-3-interp    8802d560   3  --when ra==ffffffff8802ecec --blank-disk
+real-ed20-1-interp    8802d560   1  --when ra==ffffffff8802ed20 --blank-disk
+real-f138-1-interp    8802d560   1  --when ra==ffffffff8802f138 --blank-disk
+syn-len1              8802d560   1  --when ra==ffffffff8802ec44 --set a1=1 --blank-disk
+syn-random4093        8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/random4093.bin@88600000 --set a0=ffffffff88600000 --set a1=ffd --blank-disk
+syn-ones777-odd       8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/ones777.bin@88600003 --set a0=ffffffff88600003 --set a1=309 --blank-disk
+syn-sram-src          8802d560   1  --when ra==ffffffff8802ec44 --load ${INPUTS}/random4093.bin@80070000 --set a0=ffffffff80070001 --set a1=200 --blank-disk
 
 # 0x8802d774: compiled C with a stack frame (stores), reads the table at
 # 0x88040e60 (rom-1). The game only calls it with a0=2 during boot, so the
 # a0==1 path is covered by synthetic cases only.
-d774-real-eba0-1      8802d774   1  --when ra==ffffffff8802eba0
-d774-real-eba0-3      8802d774   3  --when ra==ffffffff8802eba0
-d774-real-f03c-4      8802d774   4  --when ra==ffffffff8802f03c
-d774-real-f03c-7      8802d774   7  --when ra==ffffffff8802f03c
-syn-d774-a0eq1        8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e60 --set a0=1 --set a1=0 --set a2=20
-syn-d774-a0eq2        8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e60 --set a1=0 --set a2=40
-syn-d774-a0eq1-neg    8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e50 --set a0=1 --set a1=fffffffffffffffd --set a2=5
-syn-d774-bigsum       8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/ones777.bin@88040e60 --set a1=0 --set a2=300
-syn-d774-empty        8802d774   1  --when ra==ffffffff8802eba0 --set a1=5 --set a2=5
+d774-real-eba0-1      8802d774   1  --when ra==ffffffff8802eba0 --blank-disk
+d774-real-eba0-3      8802d774   3  --when ra==ffffffff8802eba0 --blank-disk
+d774-real-f03c-4      8802d774   4  --when ra==ffffffff8802f03c --blank-disk
+d774-real-f03c-7      8802d774   7  --when ra==ffffffff8802f03c --blank-disk
+syn-d774-a0eq1        8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e60 --set a0=1 --set a1=0 --set a2=20 --blank-disk
+syn-d774-a0eq2        8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e60 --set a1=0 --set a2=40 --blank-disk
+syn-d774-a0eq1-neg    8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/random4093.bin@88040e50 --set a0=1 --set a1=fffffffffffffffd --set a2=5 --blank-disk
+syn-d774-bigsum       8802d774   1  --when ra==ffffffff8802eba0 --load ${INPUTS}/ones777.bin@88040e60 --set a1=0 --set a2=300 --blank-disk
+syn-d774-empty        8802d774   1  --when ra==ffffffff8802eba0 --set a1=5 --set a2=5 --blank-disk
+
+# FPU functions (single precision). Selections by exact input tuple come
+# from `list` runs; calls late in a run may not recur in a capture run (the
+# list run stops at every call, which appears to perturb the CPU/DCS
+# interleaving), so late cases are selected by property instead. Captured with the real kinst.chd, during
+# attract mode / gameplay. 0x8801a1e8 takes its inputs in registers, so only
+# real calls (DRC) are used: MAME's interpreter truncates CVT.W.S instead of
+# rounding per FCSR.RM, so it cannot serve as the oracle for that function.
+# 0x880176f0 reads globals at 0x88035e30-0x88035e40; its synthetic cases
+# inject memory only, which the DRC honours.
+fpu-a1e8-first    8801a1e8   1  --play 1 --seconds 120 --when ra==ffffffff88000880
+fpu-a1e8-h300     8801a1e8   1  --play 1 --seconds 120 --when 'v0==4c65&&a0==99cf&&v1==10c00&&a1==10c00'
+fpu-a1e8-h1500    8801a1e8   1  --play 1 --seconds 120 --when 'v0==6107&&a0==100f&&v1==10c00&&a1==10c00'
+fpu-a1e8-zero     8801a1e8   1  --play 1 --seconds 120 --when 'v0==ffffffffffff8000&&a0==ffffffffffff8000'
+fpu-a1e8-neg      8801a1e8   1  --play 1 --seconds 120 --when 'a0>=ffffffff80000000'
+fpu-76f0-1        880176f0   1  --play 1 --seconds 420 --when ra==ffffffff88016950
+fpu-76f0-5        880176f0   5  --play 1 --seconds 420 --when ra==ffffffff88016950
+fpu-76f0-8        880176f0   8  --play 1 --seconds 420 --when ra==ffffffff88016950
+syn-fpu-76f0-zero     880176f0   1  --play 1 --seconds 420 --when ra==ffffffff88016950 --load ${INPUTS}/fpu_zero.bin@88035e30
+syn-fpu-76f0-neg      880176f0   1  --play 1 --seconds 420 --when ra==ffffffff88016950 --load ${INPUTS}/fpu_negcross.bin@88035e30
+syn-fpu-76f0-random1  880176f0   1  --play 1 --seconds 420 --when ra==ffffffff88016950 --load ${INPUTS}/fpu_random1.bin@88035e30
+syn-fpu-76f0-random2  880176f0   1  --play 1 --seconds 420 --when ra==ffffffff88016950 --load ${INPUTS}/fpu_random2.bin@88035e30
+
+# 0x8802d694: fills the byte table at 0x88040e60 over [a0, a1); a branch
+# targets the delay slot of the loop entry (loop rotation), exercising the
+# translator's duplicated delay-slot path. Real disk.
+d694-real-1       8802d694   1  --play 1 --seconds 120 --when ra==ffffffff8802d544
+d694-real-2       8802d694   2  --play 1 --seconds 120 --when ra==ffffffff8802d544
+d694-real-3       8802d694   3  --play 1 --seconds 120 --when ra==ffffffff8802d544
+syn-d694-empty    8802d694   1  --play 1 --play-start 8000 --seconds 300 --when ra==ffffffff8802d544 --set a0=5 --set a1=5

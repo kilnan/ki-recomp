@@ -9,16 +9,17 @@ hypothesis, **[?]** open.
 The main game program of Killer Instinct 1 (rev. L1.5D) is not on the hard
 disk. It is stored compressed in the U98 boot EPROM, and the boot ROM unpacks it
 into DRAM at 0x88000000 [O]. We extracted it with kipack and checked it word for
-word against MAME's DRAM. A small dedicated translator (Python + rabbitizer)
-turned two real game functions into C++ automatically: 0x8802d560 (a 64-bit
-shift-register checksum, 20 instructions) and 0x8802d774 (compiled C with a
-stack frame, 41 instructions). On 24 calls captured in MAME, 15 of them made by
-the game itself, the recompiled code reproduces all 32 64-bit GPRs, HI, LO, the
-return address and every byte of SRAM (512 KiB) and DRAM (8 MiB). A mutation
-test confirms that the comparison detects wrong translations. The same
-translator handles 519 of the 567 `jal` targets of the image, and the result
-compiles. The 48 failures are mostly FPU instructions, which are not yet
-supported.
+word against MAME's DRAM. With the real disk image, 15 minutes of scripted play
+(character select, fights, game over, high scores, attract mode) execute no code
+outside that image, apart from a 5-instruction exception stub in SRAM and the
+boot ROM [O, §3]. A small dedicated translator (Python + rabbitizer) now turns
+five real game functions into C++ automatically, including two single-precision
+FPU functions. On 40 calls captured in MAME, 26 of them made by the game itself,
+the recompiled code reproduces all 32 64-bit GPRs, HI, LO, the low halves of the
+32 FPRs, FCSR, the return address, and every byte of SRAM (512 KiB) and DRAM
+(8 MiB). A mutation test confirms that the comparison detects wrong translations,
+and documents one coverage gap. The translator handles 562 of the 567 `jal`
+targets of the image, and the result compiles without warnings.
 
 ## 2. Sources consulted
 
@@ -86,8 +87,29 @@ MAME is the oracle (see §6).
 
 **Consequence:** the code to recompile is available from the 512 KiB U98 alone.
 The 131 MB disk holds graphics and other data (ki-rom NOTES.md lists image
-assets). Whether the disk also contains code loaded into RAM later is **[?]**:
-it needs the real CHD and a watchpoint on executed DRAM outside rom-0.
+assets).
+
+**No code is executed from the disk in the scenarios tested** [O,
+`tools/mame_code_coverage.py`]. The tool runs MAME with the real `kinst.chd`
+(content SHA1 verified) and `-drc_log_uml`, so every block the DRC compiles
+is logged with its physical address. We ran two scripted sessions: coin, start,
+character select, random inputs.
+- **3 minutes:** fights, game over, name entry, high scores, back to attract mode
+  (checked on snapshots).
+- **15 minutes:** several games.
+
+Code reached:
+- rom-0: 35,892 instructions in 278 ranges, i.e. 433 of 568 `jal`-target functions;
+- 5 instructions of the SRAM exception stub at 0x80000180;
+- the boot EPROM.
+
+No block was compiled twice, so no self-modifying or reloaded code was seen.
+
+Limits:
+- the DRC log is a superset of what actually executes;
+- untested paths (test mode, endings, finishing moves, other characters) could
+  in principle load code;
+- a watchpoint-based check would be stricter.
 
 ### Disk
 - ATA drive on CS0/CS1; its IRQ goes to CPU input 1 = Cause.IP3 [S :708]. The game
@@ -150,9 +172,30 @@ it needs the real CHD and a watchpoint on executed DRAM outside rom-0.
 - With the interpreter, boot takes much longer in emulated time: 1-2 minutes of real time
   to the first call, against about 3 s with the DRC. Each instruction fetch from the EPROM is charged the 128-cycle
   wait state, which the DRC does not charge [S kinst.cpp:505-513; O].
-- The order of calls is not reproducible between MAME runs: hit #10 in one run
-  was hit #16 in another, apparently an extra write/verify round on the blank disk [O; cause ?].
-  Cases are therefore selected by call site (`--when ra==...`) plus occurrence.
+- **Determinism:** identical capture runs are bit-identical. This was checked
+  three times in parallel, and the 12 blank-disk DRC cases recaptured hours later
+  match exactly [O].
+- **Runs that stop the debugger diverge:** a `list` run stops at every call of the
+  function and drifts away from a capture run, which stops only once. Hit #10 in a
+  list was hit #16 in a capture, and some late calls seen in lists never happen in
+  captures. Hypothesis [H]: each stop ends the current timeslice and changes the
+  interleaving between the R4600 and the ADSP. Cases are therefore selected by call
+  site (`--when ra==...`) or by a property of the inputs, plus occurrence.
+- **Inputs:** scripted inputs (`tools/mame_inputs.py`) are timed on the screen's
+  emulated frame number. Shifting them by one frame changes the whole game.
+- **Parallel batch failure:** one batch of 8+ parallel MAME instances failed to
+  reach calls that a lone run reached; the cause is unknown.
+- **Resource hygiene:** the batch tools now cap parallelism at 3 and give every
+  MAME process a wall-clock timeout, killing its process group (`tools/mame_run.py`).
+  This was added after orphaned instances piled up.
+- **Interpreter vs DRC differences in MAME (FPU):**
+  - `CVT.W.S` truncates in the interpreter (`(int32_t)` cast), while the DRC uses
+    FCSR's rounding mode (`UML_FSTOINT ... ROUND_DEFAULT`), as the hardware does
+    [S mips3.cpp handle_cop1_fr1, mips3drc.cpp:3622].
+  - 32-bit FPR writes zero the high half in the interpreter (`set_cop1_reg32`) and
+    keep it in the DRC (`FPR32`).
+  - The interpreter is therefore not a valid oracle for `CVT.W.S` on non-integers,
+    and synthetic register injection needs the interpreter (see above).
 
 ## 5. N64Recomp versus a dedicated translator
 
@@ -188,6 +231,21 @@ function-boundary analysis and mod hooks.
   (not yet modelled).
 - Behaviour where the architecture leaves the result undefined, matched to MAME:
   division by zero leaves HI/LO unchanged, INT_MIN/−1 wraps, and LWR always sign-extends.
+- A branch may target the delay slot of another branch (loop rotation, e.g.
+  0x8802d69c). That instruction is emitted twice: once as the delay slot, and once
+  standalone at its label. Functions that run into the next function (shared
+  tails, non-returning loops) end with an explicit tail call.
+- COP1 (Status.FR = 1, single precision only, as in the game):
+  - FPRs are `uint64_t`; singles live in the low 32 bits, and writes keep the high
+    half (DRC behaviour). The comparison only checks the low halves.
+  - Arithmetic is host binary32: no `-ffast-math`; FLT_EVAL_METHOD is 0 on arm64
+    and x86-64.
+  - `CVT.W.S` honours FCSR.RM, with round-to-nearest ties to even. NaN and
+    out-of-range inputs saturate; on the R4600 they would trap. Not validated.
+  - `C.cond.S` sets FCSR bit 23, and `BC1F/BC1T` (and their "likely" forms) test it.
+  - FCR0 reads 0x2020, MAME's PRId for the R4600.
+  - FPU exceptions and FCSR.FS (flush to zero, set by the game) are not modelled;
+    the captured cases contain no denormals.
 - No C/C++ undefined behaviour: unsigned arithmetic, C++20 arithmetic `>>`, `memcpy`
   for memory, a portable 64×64→128 multiply (no `__int128`, for MSVC), and a
   `static_assert` on a little-endian host.
@@ -199,61 +257,99 @@ generated code is created locally in `poc/out/REPORT.md` (ignored by Git, becaus
 
 | function | role | instr. | cases | of which real game calls | result |
 |---|---|---|---|---|---|
-| 0x8802d560 | checksum: `lbu`, 64-bit shifts, `addi`, delay slot | 20 | 15 | 11 (4 call sites, 3 also on the interpreter) | 15/15 exact |
-| 0x8802d774 | compiled C: stack frame, table lookup, `sw` | 41 | 9 | 4 (2 call sites) | 9/9 exact |
+| 0x8802d560 | checksum: `lbu`, 64-bit shifts, `addi`, delay slot | 20 | 15 | 11 (4 call sites, 3 also on the interpreter; blank disk) | 15/15 exact |
+| 0x8802d774 | compiled C: stack frame, table lookup, `sw` | 41 | 9 | 4 (2 call sites; blank disk) | 9/9 exact |
+| 0x880176f0 | FPU: point-line distance, `c.eq/c.lt` + `bc1t/bc1f`, `sqrt.s`, `neg.s`, `cvt.w.s`, internal `j` | 50 | 7 | 3 (gameplay, real disk) | 7/7 exact |
+| 0x8801a1e8 | FPU: distance and scaled unit vector, `cvt.s.w`, `c.olt.s`, `div.s`, `cvt.w.s` results in FPRs | 37 | 5 | 5 (gameplay, real disk; one at distance 0, one with negative coordinates) | 5/5 exact |
+| 0x8802d694 | table fill loop; a branch targets a delay slot | 12 | 4 | 3 (after coin insert, real disk) | 4/4 exact |
 
 - **Automatic:** translation (no hand edits), CMake regeneration from the image,
   capture, comparison and report.
   **Manual:** choosing the functions and the cases.
-- Real cases come from the boot sequence with a **blank** disk. Several buffers
-  are zero-filled disk reads, but the game-built settings sectors (`real-ecec-*`,
-  `real-ed20-*`, `real-f104-1`) contain non-zero data. For 0x8802d774 the game only
-  calls the `a0 == 2` path, and only `d774-real-f03c-7` reads a non-zero table entry.
-  The `a0 == 1` path and large sums are covered by **synthetic** inputs only. These
-  run the original code in MAME, but with inputs we chose.
-- Negative control (`tests/mutation_check.py`): 5 of 5 non-equivalent mutants are caught.
-  They are a 32-bit `dsrl32`, a dropped delay slot, a sign-extending `lbu`, a 64-bit
-  result instead of 32-bit, and a 16-bit `sw`. The `sra`→`srl` mutant is equivalent for
-  this function (its input comes from `lbu`) and correctly goes undetected.
-- Limits: 0x8802d560 performs no stores, so for that function the memory check only
-  proves that no stray writes happen. Neither function touches I/O, the TLB, COP0, the
-  FPU, jump tables, calls or exceptions. Interrupts cannot occur inside these short
-  calls in our runs (no memory changed outside the stack slot), but asynchronous
-  timer interrupts are not modelled at all.
+- **Reproducibility:** the 12 blank-disk DRC cases were recaptured hours later with
+  `--blank-disk` and matched bit for bit.
+- **Real cases:**
+  - The first 24 cases come from the boot sequence with a **blank** disk. Several
+    buffers are zero-filled disk reads, but the game-built settings sectors contain
+    non-zero data.
+  - The FPU and table-fill cases come from scripted gameplay with the **real** disk.
+  - For 0x8802d774 the game only calls the `a0 == 2` path. The `a0 == 1` path,
+    large sums, empty ranges and the special vectors of 0x880176f0 are covered by
+    **synthetic** inputs only: the original code runs in MAME, but with inputs we chose.
+  - Register injection uses MAME's interpreter. The 0x880176f0 synthetic cases only
+    inject memory, so they run on the DRC.
+- **Negative control** (`tests/mutation_check.py`):
+  - **Caught (8 of 8 that must be caught):** 32-bit `dsrl32`, dropped delay slot,
+    sign-extending `lbu`, 64-bit result instead of 32, 16-bit `sw`, `c.lt` evaluated
+    as `c.le`, dropped `sqrt.s`, and truncating `cvt.w.s` in 0x880176f0.
+  - The truncating-`cvt.w.s` mutant is caught by `syn-fpu-76f0-random2` (−6.63
+    rounds to −7, truncates to −6). That case injects memory only and runs on the
+    DRC, which confirms that the oracle rounds by FCSR.
+  - **Equivalent, correctly not caught:** `sra`→`srl` on an `lbu`-derived value, and a
+    binary32 operation computed in binary64 then rounded once (for +, −, × and ÷ the
+    result is identical).
+  - **Known coverage gap:** truncating `cvt.w.s` in 0x8801a1e8. In every captured
+    call both points share the same y, so the converted values are integers. A
+    synthetic case would need register injection, i.e. the interpreter, which
+    truncates.
+- **Limits:**
+  - No validated function touches I/O, the TLB, COP0, jump tables, calls or exceptions.
+  - Timer interrupts are not modelled.
+  - In our captures, no memory outside the function's own writes changed during a
+    call, so no interrupt handler ran inside one.
 
 ### Whole-image survey (translation only, not validated)
-`--discover` on rom-0: 519 of the 567 `jal` targets are translated (37,829 instructions).
-The output compiles cleanly (`-Wall -Wextra`) in about 5 s. Failures:
-- 36 FPU (`lwc1`, `mtc1`, `mfc1`, `swc1`);
-- 10 with unusual delay slots (a branch target or a jump inside a delay slot):
-  hand-written assembly, or wrong boundaries [H];
-- 2 boundaries not found.
+`--discover` on rom-0: 562 of the 567 `jal` targets are translated (about 42,700
+instructions). The output compiles with `-Wall -Wextra`, with no warnings, in about 6 s.
+Remaining failures:
+- **3 functions with a branch inside a delay slot** (0x8800ba10, which never ran in
+  our coverage; 0x880105b0; 0x8803228c). This is UNPREDICTABLE in the ISA and is
+  hand-written spin or delay code, e.g. `bgez; bltz` at 0x880106b8. Reproducing it
+  needs MAME's exact behaviour or a small interpreter fallback.
+- **2 very large functions** (0x88002038, about 20 KB with branches up to 0x8800702c,
+  probably the main loop; and 0x88008cbc). Both contain `jal` targets in their
+  middle, and the linear scan runs into data.
 
 Beyond the `jal` targets, the image contains 53 `jr` through registers other than
-`$ra` (jump tables) and 42 `jalr` (function pointers).
+`$ra` and 42 `jalr`. The translator currently treats every `jr` to a register other
+than `$ra` as a call through the function table. That is right for tail calls
+through pointers, but **wrong for switch jump tables**, whose targets are labels
+inside the same function. This must be fixed before running whole code paths.
 
 ## 8. Open questions
 
-1. Does the disk contain code that is copied to RAM and executed? This needs `kinst.chd`.
-2. Behaviour after the disk check: the main loop, frame pacing (polled VBLANK
-   plus the Count/Compare timer interrupt) and what the timer handler does.
+1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:
+   test mode, endings, every character, and a stricter watchpoint check.
+2. The main loop and frame pacing: polled VBLANK plus the Count/Compare timer
+   interrupt. What does the timer handler at 0x880266c8 do?
 3. How the game uses the DCS ready flag: polling frequency and whether it blocks.
 4. Which exceptions the game takes in normal play. The handler treats everything
    except interrupts as fatal [O]; expected: only the timer.
-5. Self-modifying code or code copied at run time inside DRAM: none seen yet;
-   the 2 `cache` instructions in rom-0 deserve a check.
-6. The 10 functions with unusual delay slots: real hand-written assembly or
-   boundary errors?
-7. Why MAME call sequences differ between runs.
+5. What the 2 `cache` instructions in rom-0 do (no recompiled blocks were seen).
+6. The exact semantics of the 3 branch-in-delay-slot sequences, in MAME and on hardware.
+7. Why a list run (many debugger stops) diverges from a capture run (hypothesis
+   in §4), and why one batch of 8+ parallel instances failed.
 
 ## 9. Next step (chosen from the evidence above)
 
-Get the real `kinst.chd`. Then capture, in MAME, a frame-level reference past the
-disk check: the set of executed DRAM addresses, a watchpoint for code executed
-outside rom-0 (open question 1), and the Count/Compare/Cause timeline.
-In parallel, without the disk: add the FPU (COP1, FR=1) and the fixed zero-page
-TLB mapping to the translator and runtime, then validate one FPU-using function
-with the same capture and compare pipeline. Together these remove the two largest
-blockers measured by the survey (FPU failures and `Fault::Tlb` on `$zero`-based
-globals). Only after that does it make sense to recompile the boot-time call
-graph from 0x880001b8 and run it against a minimal I/O model.
+The evidence now points to whole-program recompilation:
+- all game code is in rom-0;
+- 562 of 567 functions translate;
+- the FPU is validated.
+
+What blocks running real code paths is no longer instruction semantics but
+control flow and system state. In order:
+1. Jump tables. Turn `jr reg` with an in-function target into a computed `goto`
+   (switch over the targets found by scanning the `lw` from the table), with the
+   function-table call kept only for real tail calls.
+2. The fixed zero-page TLB mapping (VA 0x0000-0x0fff → PA 0x08090000) in the runtime.
+3. A COP0 model: Status, Cause (with VBLANK/IDE pending bits supplied by the I/O
+   model) and Count/Compare. Deliver the timer interrupt at safe points (function
+   entry and loop back-edges) by calling the recompiled handler.
+4. A lockstep check against MAME at function granularity. Run the recompiled boot
+   path from 0x880001b8 with an I/O model that **replays the I/O reads recorded
+   in MAME**, and compare the sequence of calls and the framebuffer up to the
+   first frame of attract mode. The coverage tool's call data says which
+   functions to expect.
+
+SDL is still unnecessary until step 4 produces a framebuffer worth displaying.

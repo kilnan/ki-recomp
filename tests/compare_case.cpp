@@ -79,6 +79,12 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 32; ++i) c.r[i] = entry.at(kGprNames[i]);
     c.hi = entry.at("hi");
     c.lo = entry.at("lo");
+    // COP1 state is present in captures made after FPU support was added.
+    const bool has_fpu = entry.count("ccr31") && expect.count("ccr31");
+    if (has_fpu) {
+        for (int i = 0; i < 32; ++i) c.f[i] = entry.at("fpr" + std::to_string(i));
+        c.fcsr = static_cast<uint32_t>(entry.at("ccr31"));
+    }
     c.sram = read_file(dir + "/entry_sram.bin", ki::kSramSize);
     c.dram = read_file(dir + "/entry_dram.bin", ki::kDramSize);
     const auto entry_sram = c.sram, entry_dram = c.dram;
@@ -112,6 +118,24 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 32; ++i) check(kGprNames[i], entry.at(kGprNames[i]), c.r[i]);
     check("hi", entry.at("hi"), c.hi);
     check("lo", entry.at("lo"), c.lo);
+    if (has_fpu) {
+        // Only the low 32 bits of each FPR: the game uses single precision, and
+        // MAME's DRC and interpreter disagree on the high half after 32-bit writes.
+        for (int i = 0; i < 32; ++i) {
+            std::string n = "fpr" + std::to_string(i);
+            uint64_t before = ki::lo32(entry.at(n)), want = ki::lo32(expect.at(n)), got = ki::lo32(c.f[i]);
+            bool match = got == want;
+            ok &= match;
+            if (before != want || !match)
+                std::printf("    f%-3d %08llx -> %08llx  recomp %08llx  %s\n", i, (unsigned long long)before,
+                            (unsigned long long)want, (unsigned long long)got, match ? "ok" : "MISMATCH");
+        }
+        uint32_t before = static_cast<uint32_t>(entry.at("ccr31")), want = static_cast<uint32_t>(expect.at("ccr31"));
+        bool match = c.fcsr == want;
+        ok &= match;
+        if (before != want || !match)
+            std::printf("    fcsr %08x -> %08x  recomp %08x  %s\n", before, want, c.fcsr, match ? "ok" : "MISMATCH");
+    }
     // The recompiled function returns to its caller; MAME stopped at $ra.
     uint64_t ret = c.r[31];
     bool pc_ok = ki::lo32(ret) == ki::lo32(expect.at("pc"));

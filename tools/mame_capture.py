@@ -30,11 +30,16 @@ from pathlib import Path
 
 GPR = ["zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
        "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"]
-REGS = GPR + ["hi", "lo", "pc"]
+FPR = [f"fpr{i}" for i in range(32)]
+# ccr31 = FCSR. FPRs are printed as 64-bit raw values; the comparison only
+# uses their low 32 bits (see tests/compare_case.cpp).
+REGS = GPR + ["hi", "lo", "pc"] + FPR + ["ccr31"]
 SRAM = (0x80000000, 0x80000)   # logical KSEG0 address, length
 DRAM = (0x88000000, 0x800000)
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+import mame_run  # noqa: E402
 
 
 def regs_printf(tag: str) -> str:
@@ -47,7 +52,7 @@ def regs_printf(tag: str) -> str:
     return ";".join(out)
 
 
-def lua_script(commands: list[str], console_out: Path) -> str:
+def lua_script(commands: list[str], console_out: Path, extra: str = "") -> str:
     cmds = ",\n".join("  " + json.dumps(c) for c in commands)
     return f"""
 local dbg = manager.machine.debugger
@@ -66,6 +71,7 @@ local function flush()
 end
 emu.register_frame_done(flush)
 emu.add_machine_stop_notifier(function() flush(); out:close() end)
+{extra}
 cpu.debug:go()
 """
 
@@ -73,7 +79,13 @@ cpu.debug:go()
 def run_mame(args, commands: list[str], workdir: Path, seconds: int) -> list[str]:
     console = workdir / "console.log"
     script = workdir / "capture.lua"
-    script.write_text(lua_script(commands, console))
+    extra = ""
+    if args.play is not None:
+        sys.path.insert(0, str(ROOT / "tools"))
+        from mame_inputs import input_lua, play_script
+        events, _ = play_script(seconds * 60, 10**9, args.play, args.play_start)
+        extra = input_lua(events)
+    script.write_text(lua_script(commands, console, extra))
     # Fresh NVRAM/diff each run so every capture starts from the same state.
     for d in ("nvram", "diff", "cfg"):
         shutil.rmtree(workdir / d, ignore_errors=True)
@@ -90,10 +102,12 @@ def run_mame(args, commands: list[str], workdir: Path, seconds: int) -> list[str
         # the DRC, registers cached in UML host registers ignore debugger writes
         # (mips3_device::state_import only logs "must update UML").
         cmd += ["-nodrc"]
-    proc = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True)
+    rc, output = mame_run.run(cmd, workdir, args.timeout)
     lines = console.read_text().splitlines() if console.exists() else []
+    if rc is None:
+        print(f"MAME killed after {args.timeout}s (wall clock)", file=sys.stderr)
     if args.verbose:
-        print(proc.stdout, proc.stderr, *lines, sep="\n", file=sys.stderr)
+        print(output, *lines, sep="\n", file=sys.stderr)
     return lines
 
 
@@ -105,8 +119,8 @@ def cmd_list(args) -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
         commands = ["temp0=0",
-                    f'bpset {args.func:x},1,{{temp0=temp0+1;printf "KI_HIT n=%d a0=%x a1=%x a2=%x a3=%x ra=%x sp=%x",'
-                    f'temp0,a0,a1,a2,a3,ra,sp;g}}']
+                    f'bpset {args.func:x},1,{{temp0=temp0+1;printf "KI_HIT n=%d v0=%x v1=%x a0=%x a1=%x a2=%x a3=%x ra=%x sp=%x",'
+                    f'temp0,v0,v1,a0,a1,a2,a3,ra,sp;g}}']
         lines = run_mame(args, commands, wd, args.seconds)
     hits = [l for l in lines if l.startswith("KI_HIT")]
     for l in hits[: args.max]:
@@ -161,6 +175,10 @@ def cmd_capture(args) -> int:
         "mame": subprocess.run([args.mame, "-version"], capture_output=True, text=True).stdout.strip(),
         "bios": args.bios or "default",
         "mips3_core": "interpreter" if args.interp else "drc",
+        "play_seed": args.play,
+        "play_start": args.play_start if args.play is not None else None,
+        "disk": next(("blank" if "blankchd" in p else "kinst.chd") for p in args.rompath
+                     if (Path(p) / "kinst/kinst.chd").exists()),
         "boot_rom_sha1": sha1_of_rom(args.rompath),
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
@@ -185,7 +203,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--bios", help="MAME -bios (default v1.5d)")
     ap.add_argument("--func", required=True, type=lambda x: int(x, 16))
     ap.add_argument("--interp", action="store_true", help="run MAME's MIPS3 interpreter (-nodrc)")
+    ap.add_argument("--play", type=int, metavar="SEED",
+                    help="drive inputs (coin, start, random buttons) to reach gameplay")
+    ap.add_argument("--play-start", type=int, default=1500, metavar="FRAME",
+                    help="frame of the first coin for --play (use ~8000 with --interp)")
     ap.add_argument("--seconds", type=int, default=30, help="emulated-time limit")
+    ap.add_argument("--timeout", type=int, default=900, help="wall-clock limit for MAME (seconds)")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="mode", required=True)
     pl = sub.add_parser("list")
@@ -193,13 +216,28 @@ def main(argv: list[str]) -> int:
     pc = sub.add_parser("capture")
     pc.add_argument("--hit", type=int, required=True, help="1-based index of the entry hit")
     pc.add_argument("--when", help="debugger expression; only matching calls are counted")
+    pc.add_argument("--blank-disk", action="store_true",
+                    help="boot with the all-zero disk (data/blankchd) even if kinst.chd is present")
+    pc.add_argument("--play", dest="play_case", type=int, metavar="SEED", help="same as the global --play")
+    pc.add_argument("--play-start", dest="play_start_case", type=int, metavar="FRAME",
+                    help="same as the global --play-start")
+    pc.add_argument("--seconds", dest="seconds_case", type=int, help="same as the global --seconds")
     pc.add_argument("--out", required=True)
     pc.add_argument("--load", action="append", metavar="FILE@ADDR", help="inject file into memory at entry")
     pc.add_argument("--set", action="append", metavar="REG=HEX", help="set register at entry")
     args = ap.parse_args(argv)
+    if getattr(args, "play_case", None) is not None:
+        args.play = args.play_case
+    if getattr(args, "play_start_case", None) is not None:
+        args.play_start = args.play_start_case
+    if getattr(args, "seconds_case", None) is not None:
+        args.seconds = args.seconds_case
     if not args.rompath:
         args.rompath = [str(ROOT / "data/roms")]
-        if not (ROOT / "data/roms/kinst/kinst.chd").exists():
+        if getattr(args, "blank_disk", False):
+            # MAME takes the CHD from the first rompath entry that has one.
+            args.rompath.insert(0, str(ROOT / "data/blankchd"))
+        elif not (ROOT / "data/roms/kinst/kinst.chd").exists():
             args.rompath.append(str(ROOT / "data/blankchd"))
     args.rompath = [str(Path(p).resolve()) for p in args.rompath]
     return cmd_list(args) if args.mode == "list" else cmd_capture(args)
