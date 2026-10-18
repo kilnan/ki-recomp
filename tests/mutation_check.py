@@ -12,7 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# (name, exact text in build/gen/recompiled.cpp, replacement[, expectation])
+# (name, exact text in build/gen/recompiled.cpp, replacement[, expectation[, scope]])
+# scope: guest address of the function whose body the replacement is limited
+# to (needed when the same code is emitted in several functions).
 # expectation: True (default) = must be caught; False = equivalent mutant, no
 # input can distinguish it; "gap" = distinguishable, but no current case does
 # (documented coverage gap, reported but not failing the check).
@@ -52,6 +54,9 @@ MUTANTS = [
     # jump table (0x8802dc94)
     ("jump table: case 1 dispatched to case 2's code",
      "case 0x8802dcc0u: goto L_8802dcc0;", "case 0x8802dcc0u: goto L_8802dcc8;"),
+    # call subtree of 0x880274c8: blend routine reached through jalr (0x88010da8)
+    ("blend mask 0x739c -> 0x7bde in the jalr target 0x88010da8",
+     "c.r[22] = c.r[25] & 0x739cull;", "c.r[22] = c.r[25] & 0x7bdeull;", True, 0x88010da8),
     # t3 comes from lbu (0x0..0xff), so it is never negative: equivalent mutant.
     ("sra done as logical shift (0x8802d7f8)",
      "c.r[12] = ki::sra32(c.r[11], 1);", "c.r[12] = ki::sx32(ki::lo32(c.r[11]) >> 1);", False),
@@ -67,12 +72,18 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         for name, old, new, *rest in MUTANTS:
             expected = rest[0] if rest else True
-            if gen.count(old) != 1:
+            scope = rest[1] if len(rest) > 1 else None
+            lo, hi = 0, len(gen)
+            if scope is not None:
+                lo = gen.index(f"void func_{scope:08x}(ki::Context& c) {{")
+                hi = gen.index("\n}\n", lo)
+            body = gen[lo:hi]
+            if body.count(old) != 1:
                 print(f"SKIP  {name}: pattern not found once in generated code")
                 all_caught = False
                 continue
             src = Path(td) / "mutant.cpp"
-            src.write_text(gen.replace(old, new))
+            src.write_text(gen[:lo] + body.replace(old, new) + gen[hi:])
             exe = Path(td) / "compare_mutant"
             subprocess.run([cxx, "-std=c++20", "-O1", "-w", f"-I{ROOT}/runtime/include", str(src),
                             str(ROOT / "runtime/src/runtime.cpp"), str(ROOT / "tests/compare_case.cpp"),

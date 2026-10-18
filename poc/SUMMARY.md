@@ -10,6 +10,72 @@ with the original instructions and the generated C++ is written to `poc/out/REPO
 - Comparison: all 32 GPRs (64-bit), HI, LO, the low 32 bits of the 32 FPRs and FCSR (captures that include
   COP1 state), return address, and every byte of SRAM (512 KiB) and DRAM (8 MiB)
 
+## Function 0x880107a8
+
+
+
+Bounds: 0x880107a8-0x88011b2c (exclusive), 1249 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+
+## Function 0x88010d78
+
+
+
+Bounds: 0x88010d78-0x88010d8c (exclusive), 5 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+
+## Function 0x88010d8c
+
+
+
+Bounds: 0x88010d8c-0x88010da8 (exclusive), 7 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+
+## Function 0x88010da8
+
+
+
+Bounds: 0x88010da8-0x88010dc4 (exclusive), 7 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+
+## Function 0x88011dac
+
+
+
+Bounds: 0x88011dac-0x88011de8 (exclusive), 15 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+
+## Function 0x880123d4
+
+
+
+Bounds: 0x880123d4-0x8801242c (exclusive), 22 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+
 ## Function 0x880176f0
 
 single-precision FPU: reads two 2-D vectors from globals at 0x88035e30, computes the signed distance of a point from a line (mul/add/sub/div.s, c.eq.s/c.lt.s with bc1t/bc1f, sqrt.s, neg.s, cvt.w.s) and stores it, scaled, to a global. Leaf, 8-byte stack frame.
@@ -28,6 +94,17 @@ Bounds: 0x880176f0-0x880177b8 (exclusive), 50 instructions, found by the transla
 | syn-fpu-76f0-random2 | synthetic (inputs injected), real disk | drc | a0=11e0 a1=1 a2=11e0 ra=88016950 | ffffffff80058000 | ffffffff80058000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B), dram 0x8808e008-0x8808e00b (4 B) | PASS |
 | syn-fpu-76f0-zero | synthetic (inputs injected), real disk | drc | a0=11e0 a1=1 a2=11e0 ra=88016950 | ffffffff80058000 | ffffffff80058000 | at, v1 | dram 0x880871c8-0x880871c8 (1 B), dram 0x8808e009-0x8808e009 (1 B) | PASS |
 
+## Function 0x8801905c
+
+
+
+Bounds: 0x8801905c-0x880190d0 (exclusive), 29 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+
 ## Function 0x8801a1e8
 
 single-precision FPU: from two integer points (v0,v1) and (a0,a1) computes the distance and the scaled unit vector, returned as integers in f0..f2 (cvt.s.w, sqrt.s, c.olt.s/bc1t, div.s, cvt.w.s); points closer than a threshold return f0 = 0. Leaf, no stack.
@@ -43,6 +120,20 @@ Bounds: 0x8801a1e8-0x8801a27c (exclusive), 37 instructions, found by the transla
 | fpu-a1e8-h300 | real game call, real disk | drc | a0=99cf a1=10c00 a2=0 ra=88000880 | 4c65 | 4c65 | at | none | PASS |
 | fpu-a1e8-neg | real game call, real disk | drc | a0=fffffffffffffe5b a1=10c00 a2=0 ra=88000880 | ffffffffffffbfd5 | ffffffffffffbfd5 | at | none | PASS |
 | fpu-a1e8-zero | real game call, real disk | drc | a0=ffffffffffff8000 a1=10c00 a2=0 ra=88000880 | ffffffffffff8000 | ffffffffffff8000 | at | none | PASS |
+
+## Function 0x880274c8
+
+
+
+Bounds: 0x880274c8-0x88027628 (exclusive), 88 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+| tree-74c8-1 | real game call, real disk | drc | a0=1e a1=100 a2=4 ra=88026e98 | a | a | at, lo | sram 0x8005cde1-0x8005cde1 (1 B), sram 0x8005cde3-0x8005cdef (13 B), sram 0x8005cf26-0x8005cf35 (16 B), sram 0x8005cf60-0x8005cf69 (10 B), sram 0x8005cf70-0x8005cf81 (18 B), dram 0x880359bc-0x880359bc (1 B), dram 0x880359be-0x880359c0 (3 B), dram 0x880359c4-0x880359c5 (2 B), dram 0x880359c8-0x880359ca (3 B), dram 0x88086248-0x88086249 (2 B), dram 0x8808624c-0x88086253 (8 B), dram 0x88086255-0x88086256 (2 B), dram 0x880871d8-0x880871dc (5 B) | PASS |
+| tree-74c8-100 | real game call, real disk | drc | a0=1e a1=1000 a2=0 ra=88026e98 | ffffffff8007d800 | ffffffff8007d800 | at, lo | sram 0x8005a856-0x8005a869 (20 B), sram 0x8005a86e-0x8005a887 (26 B), sram 0x8005a892-0x8005a89d (12 B), sram 0x8005a8a4-0x8005a8c1 (30 B), sram 0x8005a8c8-0x8005a8f7 (48 B), sram 0x8005a918-0x8005a935 (30 B), sram 0x8005a944-0x8005a94d (10 B), sram 0x8005a954-0x8005a965 (18 B), dram 0x880871d8-0x880871df (8 B), dram 0x880871e2-0x880871e4 (3 B), dram 0x880871e8-0x880871ec (5 B), dram 0x880871f0-0x880871f4 (5 B), dram 0x880871f8-0x880871f9 (2 B), dram 0x88087201-0x88087203 (3 B), dram 0x88087208-0x88087208 (1 B), dram 0x8808720c-0x8808720d (2 B) | PASS |
+| tree-74c8-50 | real game call, real disk | drc | a0=1e a1=a00 a2=0 ra=88026e98 | ffffffff80055800 | ffffffff80055800 | at, lo | sram 0x80033752-0x8003378f (62 B), sram 0x80033796-0x800337b5 (32 B), sram 0x800337b7-0x800337fd (71 B), sram 0x80033818-0x8003383b (36 B), sram 0x80033842-0x80033865 (36 B), sram 0x80033868-0x8003386c (5 B), sram 0x8003386e-0x8003387b (14 B), sram 0x8003388c-0x8003389b (16 B), dram 0x880359c5-0x880359c5 (1 B), dram 0x880871d8-0x880871df (8 B), dram 0x880871e2-0x880871e4 (3 B), dram 0x880871e8-0x880871ec (5 B), dram 0x880871f0-0x880871f4 (5 B), dram 0x880871f8-0x880871f9 (2 B), dram 0x88087201-0x88087203 (3 B), dram 0x88087208-0x88087208 (1 B) | PASS |
 
 ## Function 0x8802d560
 
@@ -127,4 +218,4 @@ Bounds: 0x8802dc94-0x8802dd04 (exclusive), 28 instructions, found by the transla
 
 ## Summary
 
-49/49 cases match MAME exactly.
+52/52 cases match MAME exactly.

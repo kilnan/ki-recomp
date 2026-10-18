@@ -46,7 +46,7 @@ void dmult(Context& c, uint64_t a, uint64_t b) {
 }
 
 uint64_t io_read(Context& c, uint32_t vaddr, int size) {
-    uint32_t phys = vaddr & 0x1fffffffu;
+    uint32_t phys = vaddr & 0x1fffffffu;  // only reached for KSEG0/KSEG1 addresses
     if (c.io) return c.io->read(c, phys, size);
     return ~0ull;  // unmap_value_high
 }

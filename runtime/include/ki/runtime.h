@@ -3,8 +3,9 @@
 // Model (see docs/TECHNICAL_NOTE.md for the evidence behind each choice):
 // - 32 GPRs + HI/LO are 64-bit; 32-bit operations sign-extend their result.
 // - Effective addresses are 32-bit (the game runs in 32-bit kernel mode).
-// - KSEG0/KSEG1 map to physical by masking with 0x1fffffff. KUSEG/KSEG2 would
-//   need the TLB, which the game programs at boot; not modelled yet.
+// - KSEG0/KSEG1 map to physical by masking with 0x1fffffff. Of the TLB-mapped
+//   segments only the single page the game maps at boot is modelled (VA
+//   0x0000-0x0fff -> PA 0x08090000); other mapped addresses raise Fault::Tlb.
 // - Physical map from MAME src/mame/rare/kinst.cpp (kinst_map):
 //     0x00000000-0x0007ffff  SRAM 512 KiB (also holds the two framebuffers)
 //     0x08000000-0x087fffff  DRAM 8 MiB (game code decompressed here)
@@ -28,6 +29,7 @@ namespace ki {
 
 constexpr uint32_t kSramBase = 0x00000000, kSramSize = 0x00080000;
 constexpr uint32_t kDramBase = 0x08000000, kDramSize = 0x00800000;
+constexpr uint32_t kZeroPagePhys = 0x08090000, kZeroPageSize = 0x1000;
 
 struct Context;
 
@@ -145,9 +147,18 @@ inline uint32_t ea(uint64_t base, int32_t offset) { return lo32(base + static_ca
 inline uint8_t* ram_ptr(Context& c, uint32_t vaddr, int size, uint32_t pc, bool store) {
     if ((vaddr & static_cast<uint32_t>(size - 1)) != 0)
         raise_fault(c, store ? Fault::AddressErrorStore : Fault::AddressErrorLoad, pc, vaddr);
-    if (vaddr - 0x80000000u >= 0x40000000u)
-        raise_fault(c, Fault::Tlb, pc, vaddr);  // KUSEG/KSEG2: TLB not modelled yet
-    uint32_t phys = vaddr & 0x1fffffffu;
+    uint32_t phys;
+    if (vaddr - 0x80000000u < 0x40000000u) {
+        phys = vaddr & 0x1fffffffu;  // KSEG0/KSEG1
+    } else if (vaddr < kZeroPageSize) {
+        // The only TLB mapping the game creates (0x8800b2e0, called once at
+        // boot): VA 0x0000-0x0fff -> PA 0x08090000, used for $zero-based
+        // globals. Verified in MAME after boot; every other mapped address
+        // misses, which the game's exception handler treats as fatal.
+        phys = kZeroPagePhys + vaddr;
+    } else {
+        raise_fault(c, Fault::Tlb, pc, vaddr);
+    }
     if (phys - kSramBase < kSramSize) return c.sram.data() + (phys - kSramBase);
     if (phys - kDramBase < kDramSize) return c.dram.data() + (phys - kDramBase);
     return nullptr;

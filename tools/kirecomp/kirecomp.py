@@ -563,6 +563,20 @@ def discover_jal_targets(img: Image) -> set[int]:
     return targets
 
 
+def discover_code_pointers(img: Image) -> set[int]:
+    """Words in the data images that point at code in the image: candidate
+    entry points for jalr / function pointers (e.g. the blend routines inside
+    the drawing code, called through the table at 0x880356a4). Jump-table
+    cases also look like this; callers exclude the ones they recognise."""
+    out = set()
+    for base, blob in img.extra:
+        for off in range(0, len(blob) - 3, 4):
+            (w,) = struct.unpack_from("<I", blob, off)
+            if img.contains(w) and not w & 3:
+                out.add(w)
+    return out
+
+
 def parse_func_spec(s: str) -> tuple[int, int | None]:
     if ":" in s:
         a, b = s.split(":", 1)
@@ -579,6 +593,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--discover", action="store_true",
                     help="also translate every jal target found in the image (survey mode: "
                          "functions that fail to translate are reported and skipped)")
+    ap.add_argument("--discover-pointers", action="store_true",
+                    help="also translate code addresses found as words in the data images "
+                         "(function pointers), excluding recognised jump-table cases")
     ap.add_argument("--data", action="append", default=[], metavar="FILE@VRAM",
                     help="read-only data image (for jump tables); repeatable")
     ap.add_argument("--expect-sha1", help="refuse to translate a different image")
@@ -600,6 +617,18 @@ def main(argv: list[str]) -> int:
     if args.discover:
         explicit = {a for a, _ in specs}
         specs += [(t, None) for t in sorted(discover_jal_targets(img)) if t not in explicit]
+    if args.discover_pointers:
+        explicit = {a for a, _ in specs}
+        cases = set()
+        for off in range(0, len(img.data), 4):
+            i = img.insn(img.vram + off)
+            if i.name == "jr" and i.rs != 31:
+                jt = jump_table(img, i, img.vram, img.vram + len(img.data))
+                if jt:
+                    cases.update(jt[1])
+        ptrs = sorted(discover_code_pointers(img) - cases - explicit)
+        print(f"{len(ptrs)} code pointers in data images used as extra entries", file=sys.stderr)
+        specs += [(t, None) for t in ptrs]
     stops = frozenset(discover_jal_targets(img) | {a for a, _ in specs})
     funcs, failures = [], []
     for start, end in specs:
@@ -607,7 +636,7 @@ def main(argv: list[str]) -> int:
             end = end if end is not None else find_function_end(img, start, stops=stops)
             funcs.append(Function(start, end, [img.insn(a) for a in range(start, end, 4)]))
         except TranslateError as e:
-            if not args.discover:
+            if not (args.discover or args.discover_pointers):
                 raise
             failures.append((start, f"boundary: {e}"))
     for fn in funcs:
@@ -620,7 +649,7 @@ def main(argv: list[str]) -> int:
             body.append(tr.translate(fn))
             ok_funcs.append(fn)
         except TranslateError as e:
-            if not args.discover:
+            if not (args.discover or args.discover_pointers):
                 raise
             failures.append((fn.start, str(e)))
     if failures:
@@ -649,7 +678,7 @@ def main(argv: list[str]) -> int:
                 f.write(f"function 0x{fn.start:08x}-0x{fn.end:08x} ({len(fn.insns)} insns)\n")
                 for i in fn.insns:
                     f.write(f"  {i.vaddr:08x}: {i.word:08x}  {i.text}\n")
-    if args.discover:
+    if args.discover or args.discover_pointers:
         n = sum(len(f.insns) for f in funcs)
         print(f"translated {len(funcs)} functions ({n} instructions), {len(failures)} failed", file=sys.stderr)
         reasons: dict[str, int] = {}

@@ -13,15 +13,22 @@ word against MAME's DRAM. With the real disk image, 15 minutes of scripted play
 (character select, fights, game over, high scores, attract mode) execute no code
 outside that image, apart from a 5-instruction exception stub in SRAM and the
 boot ROM [O, §3]. A small dedicated translator (Python + rabbitizer) now turns
-six real game functions into C++ automatically: two single-precision FPU
-functions, a compiled `switch` with a jump table, and three integer functions.
-On 49 calls captured in MAME, 32 of them made by the game itself,
+real game code into C++ automatically. The validated code is:
+- six standalone functions: two single-precision FPU functions, a compiled
+  `switch` with a jump table, and three integer functions;
+- a whole call subtree of a drawing routine (eight entry points, including
+  hand-written computed jumps and blend subroutines reached through `jalr`).
+
+The subtree writes up to about 10 KB of framebuffer per call.
+
+On 52 calls captured in MAME, 35 of them made by the game itself,
 the recompiled code reproduces all 32 64-bit GPRs, HI, LO, the low halves of the
 32 FPRs, FCSR, the return address, and every byte of SRAM (512 KiB) and DRAM
 (8 MiB). A mutation test confirms that the comparison detects wrong translations,
 and documents one coverage gap. The translator handles 562 of the 567 `jal`
-targets of the image, including jump tables and computed jumps, and the result
-compiles without warnings.
+targets of the image, plus 54 entry points found as code pointers in the data.
+That includes jump tables and computed jumps, and the result compiles without
+warnings.
 
 ## 2. Sources consulted
 
@@ -252,6 +259,15 @@ function-boundary analysis and mod hooks.
     is used by 36 functions, and their switch-and-goto control flow makes the whole
     image take about 4.5 minutes to compile at `-O2`, against 6 s before. Splitting
     those functions into a separate `-O1` unit is the obvious mitigation.
+- **Entry points** come from `jal` targets (`--discover`) and from words in the
+  data images that point at code (`--discover-pointers`), excluding recognised
+  jump-table cases. The latter finds functions reached only through `jalr`, such
+  as the four BGR555 blend routines inside the drawing code at 0x880107a8, called
+  through the table at 0x880356a4. Overlapping entry points are fine: each
+  becomes its own C++ function, and the shared code is duplicated.
+- **TLB:** only the single mapping the game creates is modelled (VA 0x0000-0x0fff
+  → PA 0x08090000, for `$zero`-based globals). A MAME probe after boot confirmed
+  that it is the only mapped page; any other mapped address raises `Fault::Tlb`.
 - COP1 (Status.FR = 1, single precision only, as in the game):
   - FPRs are `uint64_t`; singles live in the low 32 bits, and writes keep the high
     half (DRC behaviour). The comparison only checks the low halves.
@@ -280,6 +296,7 @@ generated code is created locally in `poc/out/REPORT.md` (ignored by Git, becaus
 | 0x8801a1e8 | FPU: distance and scaled unit vector, `cvt.s.w`, `c.olt.s`, `div.s`, `cvt.w.s` results in FPRs | 37 | 5 | 5 (gameplay, real disk; one at distance 0, one with negative coordinates) | 5/5 exact |
 | 0x8802d694 | table fill loop; a branch targets a delay slot | 12 | 4 | 3 (after coin insert, real disk) | 4/4 exact |
 | 0x8802dc94 | compiled `switch`: `sltiu` bound check, 6-entry jump table in rom-2, default case | 28 | 9 | 6 (cases 1-5 and the default; real disk) | 9/9 exact |
+| 0x880274c8 + callees | drawing subtree: 0x880274c8, 0x8801905c, 0x880123d4 and 0x880107a8 (1599 instr.: jump table, 23 computed jumps, 10 `jalr`), plus the blend routines 0x88011dac, 0x88010d8c, 0x88010d78 and 0x88010da8; zero-page globals | 1,800+ | 3 | 3 (gameplay, real disk; 58 / 6,038 / 9,930 bytes of SRAM framebuffer written) | 3/3 exact |
 
 - **Automatic:** translation (no hand edits), CMake regeneration from the image,
   capture, comparison and report.
@@ -299,10 +316,11 @@ generated code is created locally in `poc/out/REPORT.md` (ignored by Git, becaus
   - Register injection uses MAME's interpreter. The 0x880176f0 synthetic cases only
     inject memory, so they run on the DRC.
 - **Negative control** (`tests/mutation_check.py`):
-  - **Caught (9 of 9 that must be caught):** 32-bit `dsrl32`, dropped delay slot,
+  - **Caught (10 of 10 that must be caught):** 32-bit `dsrl32`, dropped delay slot,
     sign-extending `lbu`, 64-bit result instead of 32, 16-bit `sw`, `c.lt` evaluated
-    as `c.le`, dropped `sqrt.s`, truncating `cvt.w.s` in 0x880176f0, and a jump-table
-    case sent to the wrong label.
+    as `c.le`, dropped `sqrt.s`, truncating `cvt.w.s` in 0x880176f0, a jump-table case
+    sent to the wrong label, and a wrong colour mask in the blend routine reached
+    through `jalr` (caught by all three subtree cases).
   - The truncating-`cvt.w.s` mutant is caught by `syn-fpu-76f0-random2` (−6.63
     rounds to −7, truncates to −6). That case injects memory only and runs on the
     DRC, which confirms that the oracle rounds by FCSR.
@@ -314,16 +332,19 @@ generated code is created locally in `poc/out/REPORT.md` (ignored by Git, becaus
     synthetic case would need register injection, i.e. the interpreter, which
     truncates.
 - **Limits:**
-  - No validated function touches I/O, the TLB, COP0, calls or exceptions.
-  - Only one compiled jump table has been validated; the hand-written
-    computed-jump fallback has not been validated at all.
+  - No validated code touches I/O, COP0 or exceptions.
+  - The subtree cases exercise calls, `jalr` through a pointer table, the zero page
+    and the all-labels fallback of 0x880107a8. Which of its 23 computed jumps were
+    actually taken has not been traced.
   - Timer interrupts are not modelled.
   - In our captures, no memory outside the function's own writes changed during a
     call, so no interrupt handler ran inside one.
 
 ### Whole-image survey (translation only, not validated)
 `--discover` on rom-0 with the data images: 562 of the 567 `jal` targets are
-translated, about 44,000 instructions. The output compiles with `-Wall -Wextra`
+translated, about 44,000 instructions. With `--discover-pointers`, 54 more entry
+points come from code pointers in the data, all of which translate (616 functions,
+about 47,600 instructions). The output compiles with `-Wall -Wextra`
 and no warnings (about 4.5 minutes at `-O2`, see §6).
 
 Of the 60 `jr` sites through a register other than `$ra`:
@@ -369,15 +390,14 @@ The evidence now points to whole-program recompilation:
 - the FPU is validated.
 
 What blocks running real code paths is no longer instruction semantics but
-control flow and system state. Jump tables and computed jumps are done (§6). In
-order:
+control flow and system state. Jump tables, computed jumps, code-pointer entry
+points and the zero-page mapping are done (§6). In order:
 1. Bounds for the two large regions and their bytecode dispatch (0x88002038,
    0x88008cbc), and a fallback for the 3 branch-in-delay-slot sequences.
-2. The fixed zero-page TLB mapping (VA 0x0000-0x0fff → PA 0x08090000) in the runtime.
-3. A COP0 model: Status, Cause (with VBLANK/IDE pending bits supplied by the I/O
+2. A COP0 model: Status, Cause (with VBLANK/IDE pending bits supplied by the I/O
    model) and Count/Compare. Deliver the timer interrupt at safe points (function
    entry and loop back-edges) by calling the recompiled handler.
-4. A lockstep check against MAME at function granularity. Run the recompiled boot
+3. A lockstep check against MAME at function granularity. Run the recompiled boot
    path from 0x880001b8 with an I/O model that **replays the I/O reads recorded
    in MAME**, and compare the sequence of calls and the framebuffer up to the
    first frame of attract mode. The coverage tool's call data says which

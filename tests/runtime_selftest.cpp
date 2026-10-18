@@ -90,6 +90,16 @@ int main() {
     set_fcc(c, true);
     CHECK_EQ(c.fcsr >> 23 & 1, 1);
 
+    // Zero page: VA 0x0000-0x0fff is DRAM 0x88090000; other KUSEG addresses fault.
+    store<uint32_t>(c, 0x1f0u, 0x12345678u, 0);
+    CHECK_EQ(load<uint32_t>(c, 0x88090000u + 0x1f0u, 0), 0x12345678u);
+    faulted = false;
+    try { (void)load<uint32_t>(c, 0x4000u, 0); } catch (const GuestFault& f) { faulted = f.fault == Fault::Tlb; }
+    CHECK_EQ(faulted, 1);
+    faulted = false;
+    try { (void)load<uint64_t>(c, 0xffffe000u, 0); } catch (const GuestFault& f) { faulted = f.fault == Fault::Tlb; }
+    CHECK_EQ(faulted, 1);
+
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

@@ -83,3 +83,12 @@ dc94-real-a7      8802dc94   1  --play 1 --seconds 120 --when a0==7
 syn-dc94-a0       8802dc94   1  --play 1 --play-start 8000 --seconds 300 --when a0==1 --set a0=0
 syn-dc94-a6       8802dc94   1  --play 1 --play-start 8000 --seconds 300 --when a0==1 --set a0=6
 syn-dc94-neg      8802dc94   1  --play 1 --play-start 8000 --seconds 300 --when a0==1 --set a0=ffffffffffffffff
+
+# 0x880274c8 with its callees 0x8801905c, 0x880107a8 (drawing routine: jump
+# table, hand-written computed jumps, jalr) and 0x880123d4: a call subtree.
+# Reads $zero-based globals through the zero-page TLB mapping. 0x880107a8
+# calls four blend routines inside itself through the pointer table at
+# 0x880356a4 (0x88011dac, 0x88010d8c, 0x88010d78, 0x88010da8). Real disk.
+tree-74c8-1       880274c8    1  --play 1 --seconds 120 --when ra==ffffffff88026e98
+tree-74c8-50      880274c8   50  --play 1 --seconds 120 --when ra==ffffffff88026e98
+tree-74c8-100     880274c8  100  --play 1 --seconds 120 --when ra==ffffffff88026e98

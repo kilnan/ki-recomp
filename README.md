@@ -4,10 +4,12 @@ Exploratory static recompilation of **Killer Instinct** (Rare/Midway arcade,
 1994; MIPS R4600 little-endian) to C++, with macOS Apple Silicon as the first
 host and a portable runtime (C++20, CMake, no SDL yet).
 
-Current state: a feasibility proof. Six real game functions are translated
-automatically from MIPS to C++: two of them use the FPU and one is a `switch`
-with a jump table. They match MAME bit for bit (CPU and FPU registers and all of
-RAM) on 49 captured calls, 32 of them made by the game itself. The translator handles 562 of the 567 functions
+Current state: a feasibility proof. Real game code is translated automatically
+from MIPS to C++. The validated code is six functions (FPU code, a `switch` with
+a jump table, integer code) and the whole call subtree of a drawing routine,
+which writes to the framebuffer. All of it matches MAME bit for bit (CPU and FPU
+registers and all of RAM) on 52 captured calls, 35 of them made by the game
+itself. The translator handles 562 of the 567 functions
 reached by `jal`. There is no runnable game yet.
 
 - Findings, sources, open questions and next step: [docs/TECHNICAL_NOTE.md](docs/TECHNICAL_NOTE.md)

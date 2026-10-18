@@ -13,7 +13,7 @@ set(KI_CODE_IMAGE_SHA1 "ed875b9f2a0d1bccf79ff63189c37488ee718659" CACHE STRING
     "expected SHA1 of KI_CODE_IMAGE")
 set(KI_DATA_IMAGES "${CMAKE_SOURCE_DIR}/data/kipack-out/rom-1.bin@88033900;${CMAKE_SOURCE_DIR}/data/kipack-out/rom-2.bin@88033880"
     CACHE STRING "read-only data images (FILE@VRAM) the translator reads jump tables from")
-set(KI_FUNCTIONS "8802d560;8802d774;880176f0;8801a1e8;8802d694;8802dc94" CACHE STRING "semicolon-separated guest functions to recompile")
+set(KI_FUNCTIONS "8802d560;8802d774;880176f0;8801a1e8;8802d694;8802dc94;880274c8;8801905c;880107a8;880123d4;88011dac;88010d8c;88010d78;88010da8" CACHE STRING "semicolon-separated guest functions to recompile")
 set(KI_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python" CACHE FILEPATH "Python with rabbitizer installed")
 
 if(MSVC)
