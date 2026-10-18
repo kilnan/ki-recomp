@@ -1,20 +1,24 @@
 // Plays the recompiled Killer Instinct program in a window (SDL2).
 //
 // usage: ki_play --boot <dir> --disk <kinst.img> --rom <ki-l15d.u98> [--scale N]
+//                [--sound-roms <dir>] [--mute]
 //
 // The guest runs on the main thread; at every VBLANK the board callback
-// presents the framebuffer, reads input and paces emulation to the arcade's
-// refresh rate (6.25 MHz / (406 x 261) = 58.98 Hz). No sound yet.
+// presents the framebuffer, reads input, queues the DCS samples produced
+// during the frame and paces emulation to the arcade's refresh rate
+// (6.25 MHz / (406 x 261) = 58.98 Hz). The sound ROMs (u10-l1 ... u36-l1)
+// are looked up next to --rom unless --sound-roms is given.
 //
 // Keys (player 1): arrows move, A S D = high quick/medium/fierce,
 // Z X C = low quick/medium/fierce, 1 = start, 5 = coin.
 // Player 2: I J K L move, Q W E / T Y U attacks... see kKeys. F2 = service
-// (test switch), Esc quits, Tab toggles unthrottled speed.
+// (test switch), Esc quits, Tab toggles unthrottled speed (no sound while on).
 #include <SDL.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -48,20 +52,30 @@ constexpr double kFrameSeconds = 1.0 / (6.25e6 / (406.0 * 261.0));
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string boot, disk, rom;
+    std::string boot, disk, rom, sound_roms;
     int scale = 3;
+    bool mute = false;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i], v = argv[i + 1];
         if (k == "--boot") boot = v;
         else if (k == "--disk") disk = v;
         else if (k == "--rom") rom = v;
         else if (k == "--scale") scale = std::stoi(v);
+        else if (k == "--sound-roms") sound_roms = v;
     }
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == "--mute") mute = true;
     if (boot.empty() || disk.empty() || rom.empty()) {
         std::fprintf(stderr, "usage: %s --boot <dir> --disk <img> --rom <u98> [--scale N]\n", argv[0]);
         return 2;
     }
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    if (sound_roms.empty()) {
+        size_t slash = rom.find_last_of('/');
+        sound_roms = slash == std::string::npos ? "." : rom.substr(0, slash);
+    }
+    if (FILE* f = std::fopen((sound_roms + "/u10-l1").c_str(), "rb")) std::fclose(f);
+    else sound_roms.clear();  // no sound ROMs: run silent
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
@@ -76,6 +90,23 @@ int main(int argc, char** argv) {
     uint32_t entry = ki::load_boot_state(c, boot);
     static ki::KinstBoard board(ki::read_file_or_die(disk), ki::read_file_or_die(rom));
     c.io = &board;
+    static std::unique_ptr<ki::Dcs> dcs;
+    SDL_AudioDeviceID audio = 0;
+    if (!sound_roms.empty()) {
+        dcs = std::make_unique<ki::Dcs>(ki::read_sound_roms_or_die(sound_roms));
+        board.dcs = dcs.get();
+        if (!mute) {
+            // KI's DCS program drives the DAC at 31250 Hz; SDL converts to the device rate.
+            SDL_AudioSpec want{};
+            want.freq = 31250;
+            want.format = AUDIO_S16SYS;
+            want.channels = 1;
+            want.samples = 1024;
+            audio = SDL_OpenAudioDevice(nullptr, 0, &want, nullptr, 0);
+            if (!audio) std::fprintf(stderr, "no audio: %s\n", SDL_GetError());
+            else SDL_PauseAudioDevice(audio, 0);
+        }
+    }
 
     bool turbo = false;
     auto next_frame = std::chrono::steady_clock::now();
@@ -95,6 +126,13 @@ int main(int argc, char** argv) {
         board.p1 = p1;
         board.p2 = p2;
 
+        if (dcs) {
+            std::vector<int16_t>& pcm = dcs->samples();
+            // Drop audio in turbo mode, or if the queue backs up past 200 ms.
+            if (audio && !turbo && SDL_GetQueuedAudioSize(audio) < 31250 * 2 / 5)
+                SDL_QueueAudio(audio, pcm.data(), static_cast<Uint32>(pcm.size() * sizeof(int16_t)));
+            pcm.clear();
+        }
         if (!turbo || frame % 8 == 0) {
             auto rgb = board.framebuffer_rgb(ctx);
             SDL_UpdateTexture(texture, nullptr, rgb.data(), 320 * 3);
@@ -105,6 +143,9 @@ int main(int argc, char** argv) {
         if (!turbo) {
             next_frame += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double>(kFrameSeconds));
+            // Follow the audio clock: when more than ~60 ms are queued, slow down slightly.
+            if (audio && SDL_GetQueuedAudioSize(audio) > 31250 * 2 * 6 / 100)
+                next_frame += std::chrono::microseconds(500);
             auto now = std::chrono::steady_clock::now();
             if (next_frame > now) std::this_thread::sleep_until(next_frame);
             else if (now - next_frame > std::chrono::milliseconds(100)) next_frame = now;  // fell behind: resync

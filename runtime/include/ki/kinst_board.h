@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "ki/dcs.h"
 #include "ki/runtime.h"
 
 namespace ki {
@@ -38,6 +39,11 @@ public:
     std::function<void(Context&, uint64_t frame)> on_vblank;
     // Displayed framebuffer as RGB888, 320 x 240 (MAME screen_update).
     std::vector<uint8_t> framebuffer_rgb(const Context& c) const;
+
+    // Sound board (optional; without it the DCS reads as always ready and is silent).
+    // The DSP runs at 10 MHz, one tenth of the CPU clock.
+    static constexpr uint64_t kCyclesPerDspCycle = 10;
+    Dcs* dcs = nullptr;
 
     // Inputs (active low, all released = 0xffffffff), see kinst.cpp ports.
     uint32_t p1 = 0xffffffff, p2 = 0xffffffff, dsw = 0xffffffff;

@@ -36,14 +36,17 @@ warnings.
 |---|---|---|---|
 | MAME `src/mame/rare/kinst.cpp` | git ee0b4a91e670a47b55c0d17d2fd8c7522ab6f03c (2026-10-18) | BSD-3-Clause | memory map, devices, ROM hashes |
 | MAME `src/devices/cpu/mips/mips3.cpp` | same | BSD-3-Clause | reference semantics (div, LWL/LWR), DRC/debugger behaviour |
-| MAME `src/mame/shared/dcs.cpp` | same | BSD-3-Clause | DCS host interface |
+| MAME `src/mame/shared/dcs.cpp` | same | BSD-3-Clause | DCS host interface, board behaviour (spec for `runtime/src/dcs.cpp`) |
+| MAME `src/devices/cpu/adsp2100/` | same | BSD-3-Clause | ADSP-2105 core, **reused** in `third_party/adsp2100/` (§7d) |
 | MAME `src/osd/modules/debugger/{none,debuggdbstub}.cpp`, `src/frontend/mame/luaengine_debug.cpp` | same | BSD-3-Clause | what can drive the debugger |
 | MAME binary | 0.289 (Homebrew bottle) | | oracle; its `-listxml` hashes for `kinst` equal the source above |
 | N64Recomp | ffb39cdad1da5de07eaaa48bd1db4a89a7986771 (2026-05-27) | MIT | reuse evaluation |
 | nekuz0r/ki-rom | 8e4344cfd2b039e2ca97c9f115bb8f1acaff804b (2026-08-16) | AGPL-3.0-only | U98 compression format, kipack tool, disk notes |
 | rabbitizer | 1.16.2 (PyPI) | MIT | instruction decoding |
 
-No code from these projects is copied into the repository, which is MIT-licensed. The runtime follows
+Apart from the ADSP-2105 core in `third_party/adsp2100/` (derived from MAME,
+BSD-3-Clause, see §7d), no code from these projects is copied into the
+repository, which is MIT-licensed. The runtime follows
 MAME's *behaviour* in the cases that are architecturally undefined, because
 MAME is the oracle (see §6).
 
@@ -464,7 +467,6 @@ Pitfalls of MAME as an oracle (in addition to §4):
   that is the logical disk geometry.
 
 Still open:
-- **Sound.** The DCS is not emulated; its status reads as always ready.
 - **Timing.** Timing is approximate (1 cycle per instruction). The game measures
   frame time with Count and adapts.
 - **Graphics fidelity.** Long sessions are not yet compared frame by frame with
@@ -473,13 +475,70 @@ Still open:
 - **Memory write taps** do not see DRC writes to RAM (fast RAM bypasses the
   handlers), so "who wrote this pixel" needs a trace instead.
 
+## 7d. Sound: the DCS board (19/10 night)
+
+Killer Instinct uses Midway's ROM-based DCS board: an ADSP-2105 DSP at 10 MHz,
+2K words of RAM shared between program and data space, eight 512 KiB sample
+ROMs and a 16-bit mono DAC at 31250 Hz [S dcs.cpp:12-24, kinst.cpp:721-774].
+
+**Choice: emulate the DSP, at low level.** The alternative, replacing the board
+with native code that interprets the game's sound commands, would need the DCS
+command set and its compressed sample format reverse-engineered first, and it
+could not be checked against MAME sample by sample. The DSP is a peripheral
+with its own code in the sound ROMs (loaded at boot and rebooted from another
+ROM bank by the game), so an interpreter is the simplest faithful option. It
+costs about 0.5 s of host time per 20 s of game.
+
+- **DSP core:** `third_party/adsp2100/`, MAME's ADSP-21xx core with the device
+  framework removed (BSD-3-Clause, notice kept). Writing an equivalent core from
+  the manual would have duplicated about 4,000 lines of instruction semantics
+  with no gain in fidelity.
+- **Board:** `runtime/src/dcs.cpp`, written for this project after MAME's
+  `dcs.cpp` (REV_DCS1 paths):
+  - memory map: program and data RAM, the 4K-word ROM bank window, bank select;
+  - input latch: IRQ2 and the "input empty" flag, acknowledged when the DSP reads it;
+  - internal timer, including MAME's "DRAM refresh only" shortcut;
+  - SPORT1 autobuffer: every half buffer, the samples go to the DAC; on wrap, IRQ1.
+- **Host side:** the CPU's writes to sound_reset, sound_control and sound_data
+  drive the board as in `kinst.cpp`. The VOLUME read now returns the real
+  input-empty flag. The DSP is advanced to the CPU's time at every sound access
+  and at safe points.
+
+**Scheduling details that mattered** (each found as a sample mismatch):
+- Interrupts are sampled only when a DSP slice starts, as in MAME. IRQ1 is a
+  pulse (`pulse_input_line` for the minimum quantum), so the slice after it is
+  one instruction long. With a longer pulse the DSP took the interrupt late,
+  after an RTI, and the boot-time beep came 1.6 s late.
+- When the DSP schedules an event (DAC start, timer write), the current slice
+  ends at once. MAME does the same by aborting the timeslice.
+- While the DAC is off, silence is output, so the stream starts at power-on.
+
+**Verification [O]:**
+- **Board alone:** MAME records 150 s of a scripted session (attract mode,
+  coin, fights) at 31250 Hz together with every sound register write
+  (`tools/mame_dcs_capture.py`). `tests/dcs_replay.cpp` replays the 2,806
+  writes on the model. All **4,599,167** non-silent samples are identical. The
+  two streams are aligned in two segments (MAME's DAC device buffers 241, then
+  351 samples after the game reboots the DSP); the content does not differ.
+- **Whole program:** `ki_run` from the boot snapshot, with the recompiled CPU
+  driving the board, produces 20 s of attract-mode audio. All **627,116**
+  samples after the first non-silent one equal MAME's recording.
+- **Not verified:** gameplay audio of the recompiled program against MAME. The
+  two runs diverge, since the game's random numbers depend on timing, so their
+  sound commands differ. The board model is verified for those commands by the
+  replay above.
+
+`ki_play` queues the samples to SDL at 31250 Hz and slows its frame pacing
+slightly when more than about 60 ms of audio are queued.
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:
    test mode, endings, every character, and a stricter watchpoint check.
 2. The main loop and frame pacing: polled VBLANK plus the Count/Compare timer
    interrupt. What does the timer handler at 0x880266c8 do?
-3. How the game uses the DCS ready flag: polling frequency and whether it blocks.
+3. How long the game waits on the DCS ready flag now that it is real (the DSP
+   acknowledges within microseconds).
 4. Which exceptions the game takes in normal play. The handler treats everything
    except interrupts as fatal [O]; expected: only the timer.
 5. What the 2 `cache` instructions in rom-0 do (no recompiled blocks were seen).

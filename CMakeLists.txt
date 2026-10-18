@@ -22,8 +22,16 @@ else()
   add_compile_options(-Wall -Wextra -Wno-unused-label)
 endif()
 
-add_library(ki_runtime STATIC runtime/src/runtime.cpp runtime/src/kinst_board.cpp)
+# ADSP-2105 core for the DCS sound board, derived from MAME (BSD-3-Clause, see third_party/adsp2100).
+add_library(adsp2105 STATIC third_party/adsp2100/adsp2105.cpp)
+target_include_directories(adsp2105 PUBLIC third_party/adsp2100)
+if(NOT MSVC)
+  target_compile_options(adsp2105 PRIVATE -Wno-sign-compare -O2)
+endif()
+
+add_library(ki_runtime STATIC runtime/src/runtime.cpp runtime/src/kinst_board.cpp runtime/src/dcs.cpp)
 target_include_directories(ki_runtime PUBLIC runtime/include)
+target_link_libraries(ki_runtime PUBLIC adsp2105)
 
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 set(GEN_SRC "${GEN_DIR}/recompiled.cpp")
@@ -147,6 +155,12 @@ if(KI_BUILD_FULL)
   target_link_libraries(ki_boot PUBLIC ki_runtime)
   add_executable(ki_run src/ki_run.cpp)
   target_link_libraries(ki_run PRIVATE ki_boot ki_full_code)
+
+  # DCS model against a MAME capture (tools/mame_dcs_capture.py); not a ctest
+  # because the capture is derived from the game and lives in traces/.
+  add_executable(dcs_replay tests/dcs_replay.cpp)
+  target_link_libraries(dcs_replay PRIVATE ki_boot ki_full_code)
+  target_include_directories(dcs_replay PRIVATE src)
 
   # Windowed player: needs SDL2 (on macOS: brew install sdl2-compat or sdl2).
   find_package(SDL2 CONFIG QUIET)

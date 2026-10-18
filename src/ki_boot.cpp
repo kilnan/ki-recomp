@@ -21,6 +21,26 @@ std::vector<uint8_t> read_file_or_die(const std::string& path) {
     return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
+std::vector<std::vector<uint8_t>> read_sound_roms_or_die(const std::string& dir) {
+    std::vector<std::vector<uint8_t>> roms;
+    for (const char* name : {"u10-l1", "u11-l1", "u12-l1", "u13-l1", "u33-l1", "u34-l1", "u35-l1", "u36-l1"})
+        roms.push_back(read_file_or_die(dir + "/" + name));
+    return roms;
+}
+
+void write_wav(const std::string& path, const std::vector<int16_t>& samples, uint32_t rate) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return;
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) std::fputc((v >> (8 * i)) & 0xff, f); };
+    auto u16 = [&](uint16_t v) { std::fputc(v & 0xff, f); std::fputc(v >> 8, f); };
+    uint32_t bytes = static_cast<uint32_t>(samples.size() * 2);
+    std::fwrite("RIFF", 1, 4, f); u32(36 + bytes); std::fwrite("WAVEfmt ", 1, 8, f);
+    u32(16); u16(1); u16(1); u32(rate); u32(rate * 2); u16(2); u16(16);
+    std::fwrite("data", 1, 4, f); u32(bytes);
+    for (int16_t s : samples) u16(static_cast<uint16_t>(s));
+    std::fclose(f);
+}
+
 uint32_t load_boot_state(Context& c, const std::string& dir) {
     std::ifstream in(dir + "/entry_regs.txt");
     if (!in) {

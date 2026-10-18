@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -34,7 +35,7 @@ void write_ppm(const std::string& path, const std::vector<uint8_t>& rgb) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string boot, disk, rom, out = ".", inputs;
+    std::string boot, disk, rom, out = ".", inputs, sound_roms, wav_out;
     static uint32_t dump_at = 0;
     static unsigned long dump_hit = 1;
     static uint64_t call_log_from = ~0ull;  // frame from which function entries are logged
@@ -60,6 +61,8 @@ int main(int argc, char** argv) {
         else if (k == "--call-log-from") call_log_from = std::stoull(v);
         else if (k == "--trace-out") trace_path = v;
         else if (k == "--trace-max") trace_max = std::stoull(v);
+        else if (k == "--sound-roms") sound_roms = v;
+        else if (k == "--wav-out") wav_out = v;
     }
     if (boot.empty() || disk.empty() || rom.empty()) {
         std::fprintf(stderr, "usage: %s --boot <dir> --disk <img> --rom <u98> [--frames N] [--dump-every K] [--out dir]\n",
@@ -71,6 +74,13 @@ int main(int argc, char** argv) {
     uint32_t entry = ki::load_boot_state(c, boot);
     static ki::KinstBoard board(ki::read_file_or_die(disk), ki::read_file_or_die(rom));
     c.io = &board;
+    static std::unique_ptr<ki::Dcs> dcs;
+    static std::string wav_path;
+    wav_path = wav_out;
+    if (!sound_roms.empty()) {
+        dcs = std::make_unique<ki::Dcs>(ki::read_sound_roms_or_die(sound_roms));
+        board.dcs = dcs.get();
+    }
     if (entry != 0x88000000u) board.set_logical_geometry(14, 40);  // set by the boot code (IDE command 0x91)
     {
         std::ifstream scr(boot + "/screen.json");  // mid-game snapshots record the beam position
@@ -144,6 +154,12 @@ int main(int argc, char** argv) {
             std::printf("s8 %08x:", s8);
             if (s8 - 0x88000000u < ki::kDramSize - 16)
                 for (int i = 0; i < 16; ++i) std::printf(" %02x", ctx.dram[s8 - 0x88000000u + i]);
+            if (dcs) {
+                std::printf("\nDCS: %zu samples at %.1f Hz, %llu DSP cycles", dcs->samples().size(), dcs->sample_rate(),
+                            static_cast<unsigned long long>(dcs->cycles()));
+                if (!wav_path.empty())
+                    ki::write_wav(wav_path, dcs->samples(), static_cast<uint32_t>(dcs->sample_rate() + 0.5));
+            }
             std::printf("\nstatus %08llx cause %08llx  sound writes %llu\n",
                         static_cast<unsigned long long>(ctx.cp0[ki::kCp0Status]),
                         static_cast<unsigned long long>(ki::mfc0(ctx, ki::kCp0Cause, 0)),

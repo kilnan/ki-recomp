@@ -64,6 +64,7 @@ void KinstBoard::complete_pending() {
 
 void KinstBoard::update(Context& c) {
     now_ = c.cycles;
+    if (dcs && c.cycles / kCyclesPerDspCycle >= dcs->cycles() + 1000) dcs->run_until(c.cycles / kCyclesPerDspCycle);
     if (pending_ != Pending::None && c.cycles >= busy_until_) complete_pending();
     while (c.cycles >= next_vblank_) {
         ++frame_;
@@ -129,7 +130,10 @@ uint32_t KinstBoard::reg32_read(Context& c, uint32_t a) {
     switch (a) {
         case 0x10000080: return p1;
         case 0x10000088: return p2;
-        case 0x10000090: return 0xffffffff;  // VOLUME: bit 1 = DCS input latch empty (always ready), others released
+        case 0x10000090:  // VOLUME: bit 1 = DCS input latch empty (active high), others released
+            if (!dcs) return 0xffffffff;
+            dcs->run_until(c.cycles / kCyclesPerDspCycle);
+            return dcs->input_empty() ? 0xffffffff : 0xfffffffd;
         case 0x10000098: return 0xffffffff;        // UNUSED
         case 0x100000a0: return dsw;
         case 0x10000170: return ide_read(8, false);  // CS1 reg 6: alternate status
@@ -150,8 +154,24 @@ void KinstBoard::reg32_write(Context& c, uint32_t a, uint32_t data, uint32_t mas
     auto combine = [&](uint32_t& reg) { reg = (reg & ~mask) | (data & mask); };
     switch (a) {
         case 0x10000080: combine(vram_control_); return;
-        case 0x10000088: combine(sound_reset_); ++stats.sound_writes; return;
-        case 0x10000090: combine(sound_control_); ++stats.sound_writes; return;  // DCS latch strobe: ignored
+        case 0x10000088:  // sound_reset_w: bit 0 low holds the DCS in reset
+            combine(sound_reset_);
+            ++stats.sound_writes;
+            if (dcs) {
+                dcs->run_until(c.cycles / kCyclesPerDspCycle);
+                dcs->reset_w(sound_reset_ & 1);
+            }
+            return;
+        case 0x10000090: {  // sound_control_w: a rising edge of bit 1 sends sound_data to the DCS
+            uint32_t prev = sound_control_;
+            combine(sound_control_);
+            ++stats.sound_writes;
+            if (dcs && !(prev & 2) && (sound_control_ & 2)) {
+                dcs->run_until(c.cycles / kCyclesPerDspCycle);
+                dcs->data_w(static_cast<uint16_t>(sound_data_));
+            }
+            return;
+        }
         case 0x10000098: combine(sound_data_); ++stats.sound_writes; return;
         case 0x100000a0: case 0x100000b0: return;                                // DSW (nopw), coin counters
         case 0x10000170: ide_write(8, static_cast<uint16_t>(data)); return;       // device control

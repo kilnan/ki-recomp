@@ -10,6 +10,10 @@
 namespace ki {
 
 std::vector<uint8_t> read_file_or_die(const std::string& path);
+// The eight DCS sample ROMs (u10-l1 ... u36-l1) from a directory, in board order.
+std::vector<std::vector<uint8_t>> read_sound_roms_or_die(const std::string& dir);
+// Writes 16-bit mono PCM as a WAV file.
+void write_wav(const std::string& path, const std::vector<int16_t>& samples, uint32_t rate);
 // Loads a boot-state snapshot (tools/mame_capture.py --entry-only at
 // 0x88000000): registers, COP0, FPU, SRAM and DRAM. Returns the entry address.
 uint32_t load_boot_state(Context& c, const std::string& dir);

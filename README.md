@@ -2,17 +2,18 @@
 
 Exploratory static recompilation of **Killer Instinct** (Rare/Midway arcade,
 1994; MIPS R4600 little-endian) to C++, with macOS Apple Silicon as the first
-host and a portable runtime (C++20, CMake, no SDL yet).
+host and a portable runtime (C++20, CMake; SDL2 only for the windowed player).
 
-Current state: the whole game is recompiled and plays natively, in a window
-(no sound yet) or headless. Attract mode, coin, character select, fights,
-game over and high scores all work. Real game code is translated automatically
+Current state: the whole game is recompiled and plays natively, with sound, in
+a window or headless. Attract mode, coin, character select, fights, game over
+and high scores all work. The DCS sound board (an ADSP-2105 DSP) is emulated;
+its output matches MAME sample for sample. Real game code is translated automatically
 from MIPS to C++. The validated code is six functions (FPU code, a `switch` with
 a jump table, integer code) and the whole call subtree of a drawing routine,
 which writes to the framebuffer. All of it matches MAME bit for bit (CPU and FPU
 registers and all of RAM) on 52 captured calls, 35 of them made by the game
 itself. The translator handles 562 of the 567 functions
-reached by `jal`. There is no runnable game yet.
+reached by `jal`.
 
 - Findings, sources, open questions and next step: [docs/TECHNICAL_NOTE.md](docs/TECHNICAL_NOTE.md)
 - Proof results per case: [poc/SUMMARY.md](poc/SUMMARY.md). The full report with the original
@@ -23,7 +24,10 @@ reached by `jal`. There is no runnable game yet.
 | path | what |
 |---|---|
 | `tools/kirecomp/kirecomp.py` | MIPS III (LE) -> C++ translator, decoder: rabbitizer |
-| `runtime/` | guest runtime: CPU context, memory map, arithmetic/unaligned helpers |
+| `runtime/` | guest runtime: CPU context, memory map, arithmetic/unaligned helpers; board model (`kinst_board`), DCS sound board (`dcs`) |
+| `third_party/adsp2100/` | ADSP-2105 DSP interpreter derived from MAME (BSD-3-Clause) |
+| `src/ki_run.cpp`, `src/ki_play.cpp` | headless runner and SDL2 player of the whole recompiled program |
+| `tests/dcs_replay.cpp` | DCS model against a MAME capture of sound commands and audio |
 | `tools/mame_capture.py` | captures CPU state and RAM around one call of a function in MAME |
 | `tests/compare_case.cpp` | replays a capture through the recompiled code and diffs everything |
 | `tests/mutation_check.py` | negative control: injects translation bugs, checks they are caught |
@@ -56,7 +60,7 @@ Put the MAME `kinst` set (BIOS v1.5d) in `data/roms/kinst/`:
 | file | size | CRC32 | SHA1 | needed now |
 |---|---|---|---|---|
 | `ki-l15d.u98` | 512 KiB | 7b65ca3d | 607394d4ba1713f38c2cb5159303cace9cde991e | yes |
-| `u10-l1` ... `u36-l1` (8 files) | 512 KiB each | see `tools/check_data.py` | | for MAME to start |
+| `u10-l1` ... `u36-l1` (8 files) | 512 KiB each | see `tools/check_data.py` | | for sound (and for MAME to start) |
 | `kinst.chd` | 131 MB disk | content SHA1 81d833236e994528d1482979261401b198d1ca53 | | for the gameplay cases |
 
 Hashes are from MAME `src/mame/rare/kinst.cpp` (`ROM_START(kinst)`). Verify the
@@ -126,11 +130,15 @@ build/ki_run --boot traces/bootstate --disk data/kinst.img --rom data/roms/kinst
 
 `KI_TRACE_IDE=1` logs disk commands.
 
-### Play it (SDL2 window, no sound yet)
+### Play it (SDL2 window)
 
 ```sh
 build/ki_play --boot traces/bootstate --disk data/kinst.img --rom data/roms/kinst/ki-l15d.u98 --scale 3
 ```
+
+Sound uses the eight `u10-l1` ... `u36-l1` ROMs from the directory of `--rom`
+(or `--sound-roms DIR`); without them, or with `--mute`, the game runs silent.
+`ki_run --sound-roms DIR --wav-out FILE` records the audio of a headless run.
 
 **Player 1**
 
@@ -157,7 +165,7 @@ build/ki_play --boot traces/bootstate --disk data/kinst.img --rom data/roms/kins
 | key | action |
 |---|---|
 | F2 | test switch |
-| Tab | unthrottled |
+| Tab | unthrottled (no sound while on) |
 | Esc | quit |
 
 ### Debugging against MAME
@@ -170,6 +178,10 @@ build/ki_play --boot traces/bootstate --disk data/kinst.img --rom data/roms/kins
   `ki_run --boot` starts from either kind of snapshot.
 - With `-DKI_BUILD_TRACE=ON`, `ki_run_trace --trace-out` writes one PC per
   executed instruction, to diff against a MAME `trace` log.
+- `tools/mame_dcs_capture.py --seconds 150 --out traces/dcs_play` records the
+  sound commands of a MAME session and its audio at 31250 Hz;
+  `build/dcs_replay traces/dcs_play data/roms/kinst` replays the commands on the
+  DCS model and compares the output with MAME's, sample by sample.
 
 ## License and game data
 
@@ -184,12 +196,16 @@ You need your own copy of the game.
 Third-party projects:
 
 - **MAME** (BSD-3-Clause for the files consulted) is used as documentation and
-  as an external reference emulator.
+  as an external reference emulator. The ADSP-2105 core in
+  [`third_party/adsp2100/`](third_party/adsp2100) is derived from MAME's ADSP-21xx
+  core and keeps its BSD-3-Clause license and copyright notice (Aaron Giles);
+  see the README there. The DCS board model (`runtime/src/dcs.cpp`) is written
+  for this project, following MAME's `dcs.cpp` as its specification.
 - **N64Recomp** (MIT) is used as documentation.
 - **rabbitizer** (MIT) is installed with pip.
 - **ki-rom** (AGPL-3.0-only): its kipack tool is built and run as a separate
   program by `tools/extract_game_code.sh`.
 
-No source code from these projects is included. Any code reused from them in
-the future must keep its original copyright notice. Code from ki-rom cannot be
-included without changing this project's license.
+Apart from `third_party/adsp2100/`, no source code from these projects is
+included. Code reused from them must keep its original copyright notice. Code
+from ki-rom cannot be included without changing this project's license.
