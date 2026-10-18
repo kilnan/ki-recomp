@@ -81,8 +81,19 @@ class Image:
         self.vram = vram
         self.sha1 = hashlib.sha1(data).hexdigest()
 
+        self.extra: list[tuple[int, bytes]] = []  # read-only data images (jump tables)
+
+    def add_data(self, data: bytes, vram: int):
+        self.extra.append((vram, data))
+
     def contains(self, vaddr: int) -> bool:
         return self.vram <= vaddr < self.vram + len(self.data)
+
+    def read_word(self, vaddr: int) -> int | None:
+        for base, blob in [(self.vram, self.data), *self.extra]:
+            if base <= vaddr and vaddr + 4 <= base + len(blob):
+                return struct.unpack_from("<I", blob, vaddr - base)[0]
+        return None
 
     def insn(self, vaddr: int) -> Insn:
         if not self.contains(vaddr):
@@ -108,6 +119,75 @@ def has_delay_slot(i: Insn) -> bool:
     return i.name in CONDITIONAL_BRANCHES or i.name in JUMPS
 
 
+def _resolve_const(img: Image, reg: int, pc: int, lo: int) -> int | None:
+    """Value of `reg` just before `pc`, if it is built by lui/addiu/ori in the
+    straight-line code between `lo` and `pc` (no branch targets are checked:
+    callers only use this right before a jr)."""
+    value, pending = None, []
+    a = pc - 4
+    while a >= lo:
+        i = img.insn(a)
+        writes = i.rt if i.name in ("lui", "addiu", "ori", "lw", "lbu", "lhu", "andi") else (
+            i.rd if i.name in ("addu", "sll", "or", "subu") else None)
+        if i.name in CONDITIONAL_BRANCHES or i.name in JUMPS:
+            if a < pc - 8:
+                return None
+        if writes == reg and reg != 0:
+            if i.name == "lui":
+                value = (i.imm << 16) & 0xFFFFFFFF
+                for op, imm in reversed(pending):
+                    value = (value + imm) & 0xFFFFFFFF if op == "add" else value | imm
+                return value
+            if i.name == "addiu" and i.rs == reg:
+                pending.append(("add", i.simm))
+            elif i.name == "ori" and i.rs == reg:
+                pending.append(("or", i.imm))
+            else:
+                return None
+        a -= 4
+    return None
+
+
+def jump_table(img: Image, jr: Insn, lo: int, hi: int, window: int = 48) -> tuple[int, list[int]] | None:
+    """Recognise `lw rX, off(rA); jr rX` where rA = table base + index, the base
+    being a lui/addiu constant. Returns (table address, targets): the table is
+    read while its entries point into [lo, hi) (its length is not encoded)."""
+    start = max(lo, jr.vaddr - window)
+    reg, a = jr.rs, jr.vaddr - 4
+    lw = None
+    while a >= start:
+        i = img.insn(a)
+        if i.name == "lw" and i.rt == reg:
+            lw = i
+            break
+        if reg in (i.rd if i.name in ("addu", "or", "sll") else -1, i.rt if i.name in ("lui", "addiu") else -1):
+            return None
+        a -= 4
+    if lw is None:
+        return None
+    base_reg, a = lw.rs, lw.vaddr - 4
+    while a >= start:
+        i = img.insn(a)
+        if i.name == "addu" and i.rd == base_reg:
+            for cand in (i.rs, i.rt):
+                c = _resolve_const(img, cand, i.vaddr, start)
+                if c is not None:
+                    table = (c + lw.simm) & 0xFFFFFFFF
+                    targets = []
+                    for k in range(1024):
+                        w = img.read_word(table + 4 * k)
+                        if w is None or not (lo <= w < hi) or w & 3:
+                            break
+                        targets.append(w)
+                    return (table, targets) if targets else None
+            return None
+        if base_reg in (i.rd if i.name in ("or", "sll", "subu") else -1,
+                        i.rt if i.name in ("lui", "addiu", "lw", "lbu") else -1):
+            return None
+        a -= 4
+    return None
+
+
 def find_function_end(img: Image, start: int, limit: int = 0x40000, stops: frozenset = frozenset()) -> int:
     """Linear scan: the function ends after the delay slot of the first
     `jr $ra` (or out-of-function `j`) that is not skipped over by an earlier
@@ -116,7 +196,12 @@ def find_function_end(img: Image, start: int, limit: int = 0x40000, stops: froze
     internal branch reaches past it. Returns the exclusive end address."""
     furthest = start
     pc = start
+    image_end = img.vram + len(img.data)
     while pc < start + limit:
+        if pc >= image_end:
+            if pc >= furthest:
+                return image_end
+            raise TranslateError(f"function {start:08x} branches past the end of the image")
         if pc != start and pc in stops and pc > furthest:
             return pc
         i = img.insn(pc)
@@ -128,8 +213,15 @@ def find_function_end(img: Image, start: int, limit: int = 0x40000, stops: froze
                 furthest = max(furthest, t)
             elif pc >= furthest:
                 return pc + 8  # tail call
-        elif i.name == "jr" and pc >= furthest:
-            return pc + 8
+        elif i.name == "jr":
+            if i.rs != 31:
+                # Case targets lie before the next known function entry.
+                nxt = min((x for x in stops if x > pc), default=start + limit)
+                jt = jump_table(img, i, start, nxt)
+                if jt:
+                    furthest = max(furthest, max(jt[1]))
+            if pc >= furthest:
+                return pc + 8
         pc += 4
     raise TranslateError(f"no end found for function {start:08x}")
 
@@ -328,11 +420,24 @@ class Translator:
     def translate(self, fn: Function) -> str:
         insns = fn.insns
         targets = set()
+        tables: dict[int, tuple[int, list[int]]] = {}
         for i in insns:
+            if i.name == "jr" and i.rs != 31:
+                jt = jump_table(self.img, i, fn.start, fn.end)
+                if jt:
+                    tables[i.vaddr] = jt
+                    targets.update(jt[1])
             if i.name in CONDITIONAL_BRANCHES and fn.start <= i.branch_target < fn.end:
                 targets.add(i.branch_target)
             if i.name == "j" and fn.start <= i.jump_target < fn.end:
                 targets.add(i.jump_target)
+        # A computed jump we cannot resolve (hand-written code: jumps into
+        # unrolled loops, continuations in registers) may land on any
+        # instruction of the function, so every instruction gets a label and
+        # the jump dispatches over all of them.
+        unresolved = [i for i in insns if i.name == "jr" and i.rs != 31 and i.vaddr not in tables]
+        if unresolved:
+            targets.update(i.vaddr for i in insns)
         # A branch may target an instruction that is also the delay slot of a
         # preceding branch (loop rotation). Reached that way it is an ordinary
         # instruction, so it is emitted a second time, standalone, after the
@@ -341,7 +446,8 @@ class Translator:
         for k, i in enumerate(insns[:-1]):
             if has_delay_slot(i) and insns[k + 1].vaddr in targets:
                 slot_targets.add(insns[k + 1].vaddr)
-                targets.add(insns[k + 1].vaddr + 4)
+                if insns[k + 1].vaddr + 4 < fn.end:
+                    targets.add(insns[k + 1].vaddr + 4)
         out = [f"void func_{fn.start:08x}(ki::Context& c) {{",
                f"    // guest 0x{fn.start:08x}-0x{fn.end:08x} ({len(insns)} instructions)",
                "    bool br = false;", "    (void)br;", "    (void)c;"]
@@ -402,10 +508,23 @@ class Translator:
                     emit("// jr $ra", i)
                     dslot()
                     emit("return;")
-                else:
-                    emit(f"{{ uint32_t tgt = ki::lo32({R(i.rs)});", i)
+                elif i.vaddr in tables:
+                    table, tts = tables[i.vaddr]
+                    emit(f"{{ uint32_t tgt = ki::lo32({R(i.rs)});  // jump table at 0x{table:08x}", i)
                     dslot()
-                    emit(f"  ki::call_indirect(c, tgt, {u32(i.vaddr)}); return; }}")
+                    emit("  switch (tgt) {")
+                    for t in sorted(set(tts)):
+                        emit(f"    case {u32(t)}: goto L_{t:08x};")
+                    emit(f"    default: ki::call_indirect(c, tgt, {u32(i.vaddr)}); return;")
+                    emit("  } }")
+                else:
+                    emit(f"{{ uint32_t tgt = ki::lo32({R(i.rs)});  // computed jump: any instruction", i)
+                    dslot()
+                    emit("  switch (tgt) {")
+                    for a in range(fn.start, fn.end, 4):
+                        emit(f"    case {u32(a)}: goto L_{a:08x};")
+                    emit(f"    default: ki::call_indirect(c, tgt, {u32(i.vaddr)}); return;")
+                    emit("  } }")
             elif i.name == "jalr":
                 emit(f"{{ uint32_t tgt = ki::lo32({R(i.rs)});", i)
                 if i.rd:
@@ -413,11 +532,15 @@ class Translator:
                 dslot()
                 emit(f"  ki::call_indirect(c, tgt, {u32(i.vaddr)}); }}")
             if d.vaddr in slot_targets:
-                if d.vaddr + 4 >= fn.end:
-                    raise TranslateError(f"{d.vaddr:08x}: branch target in the last delay slot")
-                emit(f"goto L_{d.vaddr + 4:08x};")
+                last_slot = d.vaddr + 4 >= fn.end
+                # Fall-through past the branch sequence skips the standalone copy.
+                emit(f"goto L_{fn.end:08x}_end;" if last_slot else f"goto L_{d.vaddr + 4:08x};")
                 out.append(f"L_{d.vaddr:08x}:")
                 emit(self.simple(d), d)
+                if last_slot:
+                    # Reached by a jump, the last delay slot runs into the next function.
+                    emit(f"{self.call(fn.end, d.vaddr)} return;")
+                    out.append(f"L_{fn.end:08x}_end: ;")
             idx += 2
         last = insns[-2] if len(insns) >= 2 else None
         ends_in_transfer = last is not None and (last.name == "jr" or last.name == "j")
@@ -456,6 +579,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--discover", action="store_true",
                     help="also translate every jal target found in the image (survey mode: "
                          "functions that fail to translate are reported and skipped)")
+    ap.add_argument("--data", action="append", default=[], metavar="FILE@VRAM",
+                    help="read-only data image (for jump tables); repeatable")
     ap.add_argument("--expect-sha1", help="refuse to translate a different image")
     ap.add_argument("--allow-unimplemented", action="store_true")
     ap.add_argument("--out", required=True, help="output .cpp")
@@ -467,6 +592,9 @@ def main(argv: list[str]) -> int:
         print(f"image sha1 {img.sha1} != expected {args.expect_sha1}", file=sys.stderr)
         return 2
 
+    for spec in args.data:
+        path, vram = spec.rsplit("@", 1)
+        img.add_data(open(path, "rb").read(), int(vram, 16))
     tr = Translator(img, args.allow_unimplemented)
     specs = [parse_func_spec(s) for s in args.func]
     if args.discover:

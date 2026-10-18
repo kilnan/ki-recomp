@@ -13,13 +13,15 @@ word against MAME's DRAM. With the real disk image, 15 minutes of scripted play
 (character select, fights, game over, high scores, attract mode) execute no code
 outside that image, apart from a 5-instruction exception stub in SRAM and the
 boot ROM [O, §3]. A small dedicated translator (Python + rabbitizer) now turns
-five real game functions into C++ automatically, including two single-precision
-FPU functions. On 40 calls captured in MAME, 26 of them made by the game itself,
+six real game functions into C++ automatically: two single-precision FPU
+functions, a compiled `switch` with a jump table, and three integer functions.
+On 49 calls captured in MAME, 32 of them made by the game itself,
 the recompiled code reproduces all 32 64-bit GPRs, HI, LO, the low halves of the
 32 FPRs, FCSR, the return address, and every byte of SRAM (512 KiB) and DRAM
 (8 MiB). A mutation test confirms that the comparison detects wrong translations,
 and documents one coverage gap. The translator handles 562 of the 567 `jal`
-targets of the image, and the result compiles without warnings.
+targets of the image, including jump tables and computed jumps, and the result
+compiles without warnings.
 
 ## 2. Sources consulted
 
@@ -235,6 +237,21 @@ function-boundary analysis and mod hooks.
   0x8802d69c). That instruction is emitted twice: once as the delay slot, and once
   standalone at its label. Functions that run into the next function (shared
   tails, non-returning loops) end with an explicit tail call.
+- `jr` to a register other than `$ra`:
+  - A **jump table** is recognised from `lw rX, off(rA); jr rX`, where rA is a
+    `lui`/`addiu` constant plus an index. The table is read from the code image or
+    from the data images (rom-1, rom-2, passed with `--data`) while its entries point
+    into the function, because table lengths are not encoded. Code emitted:
+    `switch (target) { case …: goto label; default: call through the function table }`.
+    During the boundary scan, case targets also extend the function, up to the next
+    known entry point.
+  - A **computed jump that cannot be resolved**: hand-written code jumping into
+    unrolled loops (`subu at,s7,s2; jr at` in the 0x88010xxx drawing routines), or
+    continuations held in registers. Every instruction of the function becomes a
+    label and the jump dispatches over all of them. This is correct but heavy: it
+    is used by 36 functions, and their switch-and-goto control flow makes the whole
+    image take about 4.5 minutes to compile at `-O2`, against 6 s before. Splitting
+    those functions into a separate `-O1` unit is the obvious mitigation.
 - COP1 (Status.FR = 1, single precision only, as in the game):
   - FPRs are `uint64_t`; singles live in the low 32 bits, and writes keep the high
     half (DRC behaviour). The comparison only checks the low halves.
@@ -262,6 +279,7 @@ generated code is created locally in `poc/out/REPORT.md` (ignored by Git, becaus
 | 0x880176f0 | FPU: point-line distance, `c.eq/c.lt` + `bc1t/bc1f`, `sqrt.s`, `neg.s`, `cvt.w.s`, internal `j` | 50 | 7 | 3 (gameplay, real disk) | 7/7 exact |
 | 0x8801a1e8 | FPU: distance and scaled unit vector, `cvt.s.w`, `c.olt.s`, `div.s`, `cvt.w.s` results in FPRs | 37 | 5 | 5 (gameplay, real disk; one at distance 0, one with negative coordinates) | 5/5 exact |
 | 0x8802d694 | table fill loop; a branch targets a delay slot | 12 | 4 | 3 (after coin insert, real disk) | 4/4 exact |
+| 0x8802dc94 | compiled `switch`: `sltiu` bound check, 6-entry jump table in rom-2, default case | 28 | 9 | 6 (cases 1-5 and the default; real disk) | 9/9 exact |
 
 - **Automatic:** translation (no hand edits), CMake regeneration from the image,
   capture, comparison and report.
@@ -272,16 +290,19 @@ generated code is created locally in `poc/out/REPORT.md` (ignored by Git, becaus
   - The first 24 cases come from the boot sequence with a **blank** disk. Several
     buffers are zero-filled disk reads, but the game-built settings sectors contain
     non-zero data.
-  - The FPU and table-fill cases come from scripted gameplay with the **real** disk.
+  - The FPU, table-fill and `switch` cases come from scripted gameplay with the
+    **real** disk.
+  - Case 0, the bound (6) and a "negative" index of the `switch` are synthetic.
   - For 0x8802d774 the game only calls the `a0 == 2` path. The `a0 == 1` path,
     large sums, empty ranges and the special vectors of 0x880176f0 are covered by
     **synthetic** inputs only: the original code runs in MAME, but with inputs we chose.
   - Register injection uses MAME's interpreter. The 0x880176f0 synthetic cases only
     inject memory, so they run on the DRC.
 - **Negative control** (`tests/mutation_check.py`):
-  - **Caught (8 of 8 that must be caught):** 32-bit `dsrl32`, dropped delay slot,
+  - **Caught (9 of 9 that must be caught):** 32-bit `dsrl32`, dropped delay slot,
     sign-extending `lbu`, 64-bit result instead of 32, 16-bit `sw`, `c.lt` evaluated
-    as `c.le`, dropped `sqrt.s`, and truncating `cvt.w.s` in 0x880176f0.
+    as `c.le`, dropped `sqrt.s`, truncating `cvt.w.s` in 0x880176f0, and a jump-table
+    case sent to the wrong label.
   - The truncating-`cvt.w.s` mutant is caught by `syn-fpu-76f0-random2` (−6.63
     rounds to −7, truncates to −6). That case injects memory only and runs on the
     DRC, which confirms that the oracle rounds by FCSR.
@@ -293,28 +314,38 @@ generated code is created locally in `poc/out/REPORT.md` (ignored by Git, becaus
     synthetic case would need register injection, i.e. the interpreter, which
     truncates.
 - **Limits:**
-  - No validated function touches I/O, the TLB, COP0, jump tables, calls or exceptions.
+  - No validated function touches I/O, the TLB, COP0, calls or exceptions.
+  - Only one compiled jump table has been validated; the hand-written
+    computed-jump fallback has not been validated at all.
   - Timer interrupts are not modelled.
   - In our captures, no memory outside the function's own writes changed during a
     call, so no interrupt handler ran inside one.
 
 ### Whole-image survey (translation only, not validated)
-`--discover` on rom-0: 562 of the 567 `jal` targets are translated (about 42,700
-instructions). The output compiles with `-Wall -Wextra`, with no warnings, in about 6 s.
+`--discover` on rom-0 with the data images: 562 of the 567 `jal` targets are
+translated, about 44,000 instructions. The output compiles with `-Wall -Wextra`
+and no warnings (about 4.5 minutes at `-O2`, see §6).
+
+Of the 60 `jr` sites through a register other than `$ra`:
+- **7 are recognised jump tables.** 5 of them are dispatched in translated
+  functions; the table at 0x880062b0 is shared by two overlapping entry points.
+  Of the other 2 tables, 0x8803416c sits in the large region at 0x88002038, which
+  fails to translate (see below). The cases of 0x8800f6d0 fall outside the bounds
+  the scan assigns to 0x8800ebac **[?]**, so its `jr` uses the all-labels fallback;
+- **the rest are computed jumps** (handled by the all-labels fallback) or calls
+  through trampolines.
+
 Remaining failures:
 - **3 functions with a branch inside a delay slot** (0x8800ba10, which never ran in
   our coverage; 0x880105b0; 0x8803228c). This is UNPREDICTABLE in the ISA and is
   hand-written spin or delay code, e.g. `bgez; bltz` at 0x880106b8. Reproducing it
   needs MAME's exact behaviour or a small interpreter fallback.
-- **2 very large functions** (0x88002038, about 20 KB with branches up to 0x8800702c,
-  probably the main loop; and 0x88008cbc). Both contain `jal` targets in their
-  middle, and the linear scan runs into data.
-
-Beyond the `jal` targets, the image contains 53 `jr` through registers other than
-`$ra` and 42 `jalr`. The translator currently treats every `jr` to a register other
-than `$ra` as a call through the function table. That is right for tail calls
-through pointers, but **wrong for switch jump tables**, whose targets are labels
-inside the same function. This must be fixed before running whole code paths.
+- **2 very large regions** starting at 0x88002038 and 0x88008cbc. The first looks
+  like a bytecode interpreter: an opcode is read with `lbu` from `s8` and
+  dispatched through the table at 0x8803416c. Both regions contain `jal` targets
+  in their middle, and the linear scan runs into data (`INVALID`). With other
+  bounds they also contain branches in delay slots (0x88002664, 0x8800a790).
+  They need explicit bounds, or analysis of the bytecode dispatch.
 
 ## 8. Open questions
 
@@ -338,10 +369,10 @@ The evidence now points to whole-program recompilation:
 - the FPU is validated.
 
 What blocks running real code paths is no longer instruction semantics but
-control flow and system state. In order:
-1. Jump tables. Turn `jr reg` with an in-function target into a computed `goto`
-   (switch over the targets found by scanning the `lw` from the table), with the
-   function-table call kept only for real tail calls.
+control flow and system state. Jump tables and computed jumps are done (§6). In
+order:
+1. Bounds for the two large regions and their bytecode dispatch (0x88002038,
+   0x88008cbc), and a fallback for the 3 branch-in-delay-slot sequences.
 2. The fixed zero-page TLB mapping (VA 0x0000-0x0fff → PA 0x08090000) in the runtime.
 3. A COP0 model: Status, Cause (with VBLANK/IDE pending bits supplied by the I/O
    model) and Count/Compare. Deliver the timer interrupt at safe points (function

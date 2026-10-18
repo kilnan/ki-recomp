@@ -49,6 +49,9 @@ MUTANTS = [
     ("single op evaluated in double precision (0x88017758)",
      "ki::set_fs(c, 5, ki::fs(c, 5) / ki::fs(c, 16));",
      "ki::set_fs(c, 5, static_cast<float>(double(ki::fs(c, 5)) / double(ki::fs(c, 16))));", False),
+    # jump table (0x8802dc94)
+    ("jump table: case 1 dispatched to case 2's code",
+     "case 0x8802dcc0u: goto L_8802dcc0;", "case 0x8802dcc0u: goto L_8802dcc8;"),
     # t3 comes from lbu (0x0..0xff), so it is never negative: equivalent mutant.
     ("sra done as logical shift (0x8802d7f8)",
      "c.r[12] = ki::sra32(c.r[11], 1);", "c.r[12] = ki::sx32(ki::lo32(c.r[11]) >> 1);", False),

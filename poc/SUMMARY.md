@@ -105,6 +105,26 @@ Bounds: 0x8802d774-0x8802d818 (exclusive), 41 instructions, found by the transla
 | syn-d774-bigsum | synthetic (inputs injected), blank disk | interpreter | a0=2 a1=0 a2=300 ra=8802eba0 | 17d00 | 17d00 | v0, a1, t1, t2, t3, t4, t5 | dram 0x880871f5-0x880871f7 (3 B) | PASS |
 | syn-d774-empty | synthetic (inputs injected), blank disk | interpreter | a0=2 a1=5 a2=5 ra=8802eba0 | 0 | 0 |  | dram 0x880871f6-0x880871f7 (2 B) | PASS |
 
+## Function 0x8802dc94
+
+
+
+Bounds: 0x8802dc94-0x8802dd04 (exclusive), 28 instructions, found by the translator's linear scan (first `jr $ra` not skipped by an internal forward branch).
+
+### Cases
+
+| case | kind | MAME core | inputs | v0 MAME | v0 recomp | regs changed | memory written by the call | result |
+|---|---|---|---|---|---|---|---|---|
+| dc94-real-a1 | real game call, real disk | drc | a0=1 a1=ffffffff88500200 a2=4 ra=8802dd64 | ffffffff88500520 | ffffffff88500520 | at, v0, t6 | none | PASS |
+| dc94-real-a2 | real game call, real disk | drc | a0=2 a1=ffffffff88500400 a2=0 ra=8802df7c | ffffffff88500770 | ffffffff88500770 | at, v0, t6 | none | PASS |
+| dc94-real-a3 | real game call, real disk | drc | a0=3 a1=ffffffff88500400 a2=4 ra=8802df7c | ffffffff885007c0 | ffffffff885007c0 | at, v0, t6 | none | PASS |
+| dc94-real-a4 | real game call, real disk | drc | a0=4 a1=ffffffff88500400 a2=4 ra=8802df7c | ffffffff88500810 | ffffffff88500810 | at, v0, t6 | none | PASS |
+| dc94-real-a5 | real game call, real disk | drc | a0=5 a1=ffffffff88500400 a2=4 ra=8802df7c | ffffffff88500860 | ffffffff88500860 | at, v0, t6 | none | PASS |
+| dc94-real-a7 | real game call, real disk | drc | a0=7 a1=ffffffff88500400 a2=4 ra=8802df90 | ffffffff885008ec | ffffffff885008ec | v0, t7 | none | PASS |
+| syn-dc94-a0 | synthetic (inputs injected), real disk | interpreter | a0=0 a1=ffffffff88500400 a2=0 ra=8802dd64 | ffffffff88500400 | ffffffff88500400 | at, t6 | none | PASS |
+| syn-dc94-a6 | synthetic (inputs injected), real disk | interpreter | a0=6 a1=ffffffff88500400 a2=0 ra=8802dd64 | ffffffff885008b0 | ffffffff885008b0 | at, v0, t7 | none | PASS |
+| syn-dc94-neg | synthetic (inputs injected), real disk | interpreter | a0=ffffffffffffffff a1=ffffffff88500400 a2=0 ra=8802dd64 | ffffffff8850070c | ffffffff8850070c | at, v0, t7 | none | PASS |
+
 ## Summary
 
-40/40 cases match MAME exactly.
+49/49 cases match MAME exactly.

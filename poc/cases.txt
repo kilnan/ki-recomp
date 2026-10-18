@@ -70,3 +70,16 @@ d694-real-1       8802d694   1  --play 1 --seconds 120 --when ra==ffffffff8802d5
 d694-real-2       8802d694   2  --play 1 --seconds 120 --when ra==ffffffff8802d544
 d694-real-3       8802d694   3  --play 1 --seconds 120 --when ra==ffffffff8802d544
 syn-d694-empty    8802d694   1  --play 1 --play-start 8000 --seconds 300 --when ra==ffffffff8802d544 --set a0=5 --set a1=5
+
+# 0x8802dc94: compiled C switch (sltiu bound check, 6-entry jump table in
+# rom-2 at 0x88033880, default case). Real calls cover cases 1-5 and the
+# default (a0=7); case 0, the bound and a "negative" index are synthetic.
+dc94-real-a1      8802dc94   1  --play 1 --seconds 120 --when a0==1
+dc94-real-a2      8802dc94   1  --play 1 --seconds 120 --when a0==2
+dc94-real-a3      8802dc94   1  --play 1 --seconds 120 --when a0==3
+dc94-real-a4      8802dc94   1  --play 1 --seconds 120 --when a0==4
+dc94-real-a5      8802dc94   1  --play 1 --seconds 120 --when a0==5
+dc94-real-a7      8802dc94   1  --play 1 --seconds 120 --when a0==7
+syn-dc94-a0       8802dc94   1  --play 1 --play-start 8000 --seconds 300 --when a0==1 --set a0=0
+syn-dc94-a6       8802dc94   1  --play 1 --play-start 8000 --seconds 300 --when a0==1 --set a0=6
+syn-dc94-neg      8802dc94   1  --play 1 --play-start 8000 --seconds 300 --when a0==1 --set a0=ffffffffffffffff

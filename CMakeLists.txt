@@ -11,7 +11,9 @@ set(KI_CODE_IMAGE "${CMAKE_SOURCE_DIR}/data/kipack-out/rom-0.bin" CACHE FILEPATH
     "KI 1 L1.5D game code image (rom-0, loaded at 0x88000000)")
 set(KI_CODE_IMAGE_SHA1 "ed875b9f2a0d1bccf79ff63189c37488ee718659" CACHE STRING
     "expected SHA1 of KI_CODE_IMAGE")
-set(KI_FUNCTIONS "8802d560;8802d774;880176f0;8801a1e8;8802d694" CACHE STRING "semicolon-separated guest functions to recompile")
+set(KI_DATA_IMAGES "${CMAKE_SOURCE_DIR}/data/kipack-out/rom-1.bin@88033900;${CMAKE_SOURCE_DIR}/data/kipack-out/rom-2.bin@88033880"
+    CACHE STRING "read-only data images (FILE@VRAM) the translator reads jump tables from")
+set(KI_FUNCTIONS "8802d560;8802d774;880176f0;8801a1e8;8802d694;8802dc94" CACHE STRING "semicolon-separated guest functions to recompile")
 set(KI_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python" CACHE FILEPATH "Python with rabbitizer installed")
 
 if(MSVC)
@@ -29,13 +31,19 @@ set(func_args "")
 foreach(f IN LISTS KI_FUNCTIONS)
   list(APPEND func_args --func ${f})
 endforeach()
+set(data_deps "")
+foreach(d IN LISTS KI_DATA_IMAGES)
+  list(APPEND func_args --data ${d})
+  string(REGEX REPLACE "@[0-9a-fA-F]+$" "" d_file "${d}")
+  list(APPEND data_deps "${d_file}")
+endforeach()
 add_custom_command(
   OUTPUT "${GEN_SRC}" "${GEN_DIR}/recompiled.lst"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${GEN_DIR}"
   COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
           --image "${KI_CODE_IMAGE}" --vram 88000000 --expect-sha1 ${KI_CODE_IMAGE_SHA1}
           ${func_args} --out "${GEN_SRC}" --listing "${GEN_DIR}/recompiled.lst"
-  DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_CODE_IMAGE}"
+  DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_CODE_IMAGE}" ${data_deps}
   COMMENT "Recompiling guest functions: ${KI_FUNCTIONS}"
   VERBATIM)
 
