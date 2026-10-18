@@ -4,7 +4,9 @@ Exploratory static recompilation of **Killer Instinct** (Rare/Midway arcade,
 1994; MIPS R4600 little-endian) to C++, with macOS Apple Silicon as the first
 host and a portable runtime (C++20, CMake, no SDL yet).
 
-Current state: a feasibility proof. Real game code is translated automatically
+Current state: the whole game is recompiled and plays natively, in a window
+(no sound yet) or headless. Attract mode, coin, character select, fights,
+game over and high scores all work. Real game code is translated automatically
 from MIPS to C++. The validated code is six functions (FPU code, a `switch` with
 a jump table, integer code) and the whole call subtree of a drawing routine,
 which writes to the framebuffer. All of it matches MAME bit for bit (CPU and FPU
@@ -122,7 +124,52 @@ build/ki_run --boot traces/bootstate --disk data/kinst.img --rom data/roms/kinst
     --frames 600 --dump-every 60 --out traces/run     # framebuffers as PPM
 ```
 
-`KI_TRACE_IDE=1` logs disk commands. There is no window, input or sound yet.
+`KI_TRACE_IDE=1` logs disk commands.
+
+### Play it (SDL2 window, no sound yet)
+
+```sh
+build/ki_play --boot traces/bootstate --disk data/kinst.img --rom data/roms/kinst/ki-l15d.u98 --scale 3
+```
+
+**Player 1**
+
+| key | action |
+|---|---|
+| arrows | move |
+| A / S / D | high attack: quick, medium, fierce |
+| Z / X / C | low attack: quick, medium, fierce |
+| 1 | start |
+| 5 | coin |
+
+**Player 2**
+
+| key | action |
+|---|---|
+| I / J / K / L | move |
+| Q / W / E | high attacks |
+| T / Y / U | low attacks |
+| 2 | start |
+| 6 | coin |
+
+**Other keys**
+
+| key | action |
+|---|---|
+| F2 | test switch |
+| Tab | unthrottled |
+| Esc | quit |
+
+### Debugging against MAME
+- `build/ki_run --inputs FILE` replays a scripted session; generate one with
+  `tools/make_input_script.py`.
+- `--call-log-from N` logs function entries.
+- `--dump-at ADDR[:N]` saves the state at the N-th entry of a function, in the
+  snapshot format.
+- `tools/mame_snapshot.py` takes the same kind of snapshot in MAME, mid-game.
+  `ki_run --boot` starts from either kind of snapshot.
+- With `-DKI_BUILD_TRACE=ON`, `ki_run_trace --trace-out` writes one PC per
+  executed instruction, to diff against a MAME `trace` log.
 
 ## License and game data
 

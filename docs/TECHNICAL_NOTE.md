@@ -413,6 +413,56 @@ Not modelled yet:
 - the exact cycle timing of the R4600 (caches, multiply/divide latencies);
 - disk writes are kept in memory only.
 
+## 7c. From attract mode to full games (18/10 evening)
+
+A 3-minute scripted session now plays without faults: coin, character select,
+a fight, game over, high scores and back to attract mode. It issues 826 disk
+commands. `ki_play` shows it in a window with keyboard input.
+
+The bugs were found by lockstep comparison with MAME:
+1. Snapshots of the full machine state are taken in MAME mid-game
+   (`tools/mame_snapshot.py`, two in one run when they must be comparable).
+2. The recompiled program is started from such a snapshot (`ki_run --boot`).
+3. The states are compared at the same function entry (`--dump-at`).
+4. The executed PCs are diffed against a MAME `trace` (`ki_run_trace`).
+
+Fixes, all general:
+- **VS-screen hang.** The object loop entry 0x880021c8 had control-flow bounds
+  that include lower addresses, and the generated function started at its lowest
+  address (0x88002060) instead of its entry. The game re-processed object 0
+  forever. A one-line fix, found by the PC-level diff, which diverged at the
+  first instruction of that function.
+- **Disk.** INITIALIZE DEVICE PARAMETERS sets the logical CHS geometry to
+  14 × 40. The drive check at 0x880105b0 compares IDENTIFY words 27-31 with
+  "ST9150AG  "; on a mismatch the game deliberately corrupts memory. Command,
+  seek and transfer timings follow MAME.
+- **Control flow:**
+  - tail calls run through a trampoline, so long jump chains in the bytecode
+    interpreter keep the host stack bounded;
+  - cases outside a function become entry points;
+  - leading unused jump-table slots are skipped;
+  - unresolved computed jumps (into unrolled code) do not end a function;
+  - code pointers built with `lui`/`addiu` are entry points.
+
+Pitfalls of MAME as an oracle (in addition to §4):
+- **Memory snapshots are a little late.** With the DRC and `-debugger none`,
+  memory saved by a breakpoint action reflects a slightly later point than the
+  registers printed by the same action. A table written by code after the
+  breakpoint was already present in the dump.
+- **Breakpoints change the game.** Adding breakpoints at different times changes
+  the emulated timeline (for example the CPU opponent picked). Comparisons must
+  come from the same run.
+- **Mid-game starts need board state.** Starting the recompiled program from a
+  mid-game snapshot also needs the board state that the snapshot lacks; for now
+  that is the logical disk geometry.
+
+Still open:
+- **Sound.** The DCS is not emulated; its status reads as always ready.
+- **Timing.** Timing is approximate (1 cycle per instruction). The game measures
+  frame time with Count and adapts.
+- **Graphics fidelity.** Long sessions are not yet compared frame by frame with
+  MAME; the fight stage looked plausible but was not compared.
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:
