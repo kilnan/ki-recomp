@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <string>
 #include <vector>
@@ -67,12 +68,14 @@ private:
     void ide_reset();
     uint32_t ide_lba() const;
     void ide_load_sector();
+    void track_head_position();
     void ide_finish_write_sector();
     void build_identify();
 
     std::vector<uint8_t> disk_, rom_;
     std::vector<uint64_t> io_reads_ = std::vector<uint64_t>(0x200), io_writes_ = std::vector<uint64_t>(0x200);
     uint64_t frame_ = 0, next_vblank_ = kVblankStart, phase_ = 0;
+    bool trace_vram_ = std::getenv("KI_TRACE_VRAM") != nullptr;
     uint32_t vram_control_ = 0, sound_control_ = 0, sound_data_ = 0, sound_reset_ = 0;
 
     uint8_t err_ = 0, features_ = 0, nsect_ = 0, sector_ = 0, lcyl_ = 0, hcyl_ = 0, select_ = 0;

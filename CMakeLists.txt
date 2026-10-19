@@ -33,6 +33,15 @@ add_library(ki_runtime STATIC runtime/src/runtime.cpp runtime/src/kinst_board.cp
 target_include_directories(ki_runtime PUBLIC runtime/include)
 target_link_libraries(ki_runtime PUBLIC adsp2105)
 
+# A recompiled-code library defines the function table (ki::kFunctionTable) that
+# the runtime looks entries up in, so the two static libraries depend on each
+# other. Single-pass linkers (GNU ld) need the code library again after the
+# runtime; Apple's linker does not mind.
+function(ki_code_library target)
+  target_link_libraries(${target} PUBLIC ki_runtime)
+  target_link_libraries(${target} INTERFACE "$<TARGET_FILE:${target}>")
+endfunction()
+
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 set(GEN_SRC "${GEN_DIR}/recompiled.cpp")
 set(func_args "")
@@ -56,7 +65,7 @@ add_custom_command(
   VERBATIM)
 
 add_library(ki_recompiled STATIC "${GEN_SRC}")
-target_link_libraries(ki_recompiled PUBLIC ki_runtime)
+ki_code_library(ki_recompiled)
 
 add_executable(compare_case tests/compare_case.cpp)
 target_link_libraries(compare_case PRIVATE ki_recompiled)
@@ -113,7 +122,7 @@ if(KI_BUILD_FULL)
     VERBATIM)
   add_library(ki_full_code STATIC ${full_srcs})
   target_include_directories(ki_full_code PRIVATE "${FULL_DIR}")
-  target_link_libraries(ki_full_code PUBLIC ki_runtime)
+  ki_code_library(ki_full_code)
   # The huge dispatch functions make -O2 very slow to compile; -O1 is enough for now.
   if(NOT MSVC)
     target_compile_options(ki_full_code PRIVATE -O1 -Wno-unused-parameter)
@@ -143,7 +152,7 @@ if(KI_BUILD_FULL)
       VERBATIM)
     add_library(ki_trace_code STATIC ${trace_srcs})
     target_include_directories(ki_trace_code PRIVATE "${TRACE_DIR}")
-    target_link_libraries(ki_trace_code PUBLIC ki_runtime)
+    ki_code_library(ki_trace_code)
     if(NOT MSVC)
       target_compile_options(ki_trace_code PRIVATE -O1 -Wno-unused-parameter)
     endif()

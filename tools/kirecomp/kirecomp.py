@@ -301,20 +301,20 @@ class Translator:
         if n in ("add", "sub"):
             chk = "add32_overflows" if n == "add" else "sub32_overflows"
             op = "+" if n == "add" else "-"
-            return (f"if (ki::{chk}(ki::lo32({rs}), ki::lo32({rt}))) ki::raise_fault(c, ki::Fault::Overflow, {pc}); "
+            return (f"if (ki::{chk}(ki::lo32({rs}), ki::lo32({rt}))) {{ ki::raise_fault(c, ki::Fault::Overflow, {pc}); }} "
                     + a(rd, f"ki::sx32(ki::lo32({rs}) {op} ki::lo32({rt}))"))
         if n in ("dadd", "dsub"):
             chk = "add64_overflows" if n == "dadd" else "sub64_overflows"
             op = "+" if n == "dadd" else "-"
-            return (f"if (ki::{chk}({rs}, {rt})) ki::raise_fault(c, ki::Fault::Overflow, {pc}); "
+            return (f"if (ki::{chk}({rs}, {rt})) {{ ki::raise_fault(c, ki::Fault::Overflow, {pc}); }} "
                     + a(rd, f"{rs} {op} {rt}"))
         if n == "addiu": return a(i.rt, f"ki::sx32(ki::lo32({rs}) + {u32(simm)})")
         if n == "daddiu": return a(i.rt, f"{rs} + {u64imm(simm)}")
         if n == "addi":
-            return (f"if (ki::add32_overflows(ki::lo32({rs}), {u32(simm)})) ki::raise_fault(c, ki::Fault::Overflow, {pc}); "
+            return (f"if (ki::add32_overflows(ki::lo32({rs}), {u32(simm)})) {{ ki::raise_fault(c, ki::Fault::Overflow, {pc}); }} "
                     + a(i.rt, f"ki::sx32(ki::lo32({rs}) + {u32(simm)})"))
         if n == "daddi":
-            return (f"if (ki::add64_overflows({rs}, {u64imm(simm)})) ki::raise_fault(c, ki::Fault::Overflow, {pc}); "
+            return (f"if (ki::add64_overflows({rs}, {u64imm(simm)})) {{ ki::raise_fault(c, ki::Fault::Overflow, {pc}); }} "
                     + a(i.rt, f"{rs} + {u64imm(simm)}"))
         # logic / compare
         if n == "and": return a(rd, f"{rs} & {rt}")
@@ -368,7 +368,7 @@ class Translator:
                  "tgeiu": "{rs} >= {i64}", "tlti": "ki::s64({rs}) < {simm}ll", "tltiu": "{rs} < {i64}"}
         if n in traps:
             cond = traps[n].format(rs=rs, rt=rt, simm=simm, i64=u64imm(simm))
-            return f"if ({cond}) ki::raise_fault(c, ki::Fault::Trap, {pc});"
+            return f"if ({cond}) {{ ki::raise_fault(c, ki::Fault::Trap, {pc}); }}"
         if n == "syscall": return f"ki::raise_fault(c, ki::Fault::Syscall, {pc});"
         if n == "break": return f"ki::raise_fault(c, ki::Fault::Break, {pc});"
         if n == "sync": return ";"

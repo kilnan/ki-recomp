@@ -43,13 +43,15 @@ def main() -> int:
     saves = [f"save {out}/entry_sram.bin,{SRAM[0]:x},{SRAM[1]:x}",
              f"save {out}/entry_dram.bin,{DRAM[0]:x},{DRAM[1]:x}"]
     # The screen position is printed from Lua right after the hit (see below).
-    action = ";".join([regs_printf("KI_ENTRY"), *saves, 'printf "KI_SNAPSHOT_DONE"', "g"])
+    action = ";".join([regs_printf("KI_ENTRY"), 'printf "KI_TOTALCYCLES %d",totalcycles', *saves,
+                       'printf "KI_SNAPSHOT_DONE"', "g"])
     then_out = Path(args.then_out).resolve() if args.then else None
     if then_out:
         then_out.mkdir(parents=True, exist_ok=True)
         then_saves = [f"save {then_out}/entry_sram.bin,{SRAM[0]:x},{SRAM[1]:x}",
                       f"save {then_out}/entry_dram.bin,{DRAM[0]:x},{DRAM[1]:x}"]
-        then_action = ";".join([regs_printf("KI_THEN"), *then_saves, 'printf "KI_THEN_DONE"', "g"])
+        then_action = ";".join([regs_printf("KI_THEN"), 'printf "KI_THEN_TOTALCYCLES %d",totalcycles', *then_saves,
+                                'printf "KI_THEN_DONE"', "g"])
     events, _ = play_script(args.frame + 600, 10**9, args.play_seed)
     lua = f"""
 local dbg = manager.machine.debugger
@@ -112,6 +114,13 @@ cpu.debug:go()
     scr = parse_regs(screen.replace("KI_SCREEN ", ""))
     # parse_regs reads hex; frame/vpos/hpos were printed in decimal
     scr = {k: int(v) for k, v in (kv.split("=") for kv in screen.split()[1:])}
+    # The VBLANK distance printed from Lua is taken at the end of the frame, not
+    # at the breakpoint; compute it from the CPU's cycle count at the hit instead
+    # (the screen starts at time 0, one frame = 406 x 261 pixels of 16 cycles).
+    total = next((l.split()[1] for l in lines if l.startswith("KI_TOTALCYCLES")), None)
+    if total is not None:
+        frame_cycles = 406 * 261 * 16
+        scr["to_vblank_ns"] = (frame_cycles - int(total) % frame_cycles) % frame_cycles * 10
     (out / "screen.json").write_text(json.dumps(scr) + "\n")
     (out / "meta.json").write_text(json.dumps({"addr": f"{args.addr:08x}", "armed_at_frame": args.frame,
                                                "play_seed": args.play_seed, **scr}, indent=2) + "\n")
@@ -124,6 +133,10 @@ cpu.debug:go()
         tregs = parse_regs(then_line)
         (then_out / "entry_regs.txt").write_text("".join(f"{r} {tregs[r]:016x}\n" for r in REGS))
         tscr = {k: int(v) for k, v in (kv.split("=") for kv in then_screen.split()[1:])}
+        ttotal = next((l.split()[1] for l in lines if l.startswith("KI_THEN_TOTALCYCLES")), None)
+        if ttotal is not None:
+            frame_cycles = 406 * 261 * 16
+            tscr["to_vblank_ns"] = (frame_cycles - int(ttotal) % frame_cycles) % frame_cycles * 10
         (then_out / "screen.json").write_text(json.dumps(tscr) + "\n")
         print(f"second snapshot at {args.then:08x}, frame {tscr['frame']} -> {then_out}")
     shutil.rmtree(wd, ignore_errors=True)

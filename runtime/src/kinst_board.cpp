@@ -153,7 +153,11 @@ void KinstBoard::reg32_write(Context& c, uint32_t a, uint32_t data, uint32_t mas
     if (io_histogram_on && a - 0x10000000u < io_writes_.size()) ++io_writes_[a - 0x10000000u];
     auto combine = [&](uint32_t& reg) { reg = (reg & ~mask) | (data & mask); };
     switch (a) {
-        case 0x10000080: combine(vram_control_); return;
+        case 0x10000080:
+            combine(vram_control_);
+            if (trace_vram_)  // KI_TRACE_VRAM: buffer flips, to compare frame timing with MAME
+                std::fprintf(stderr, "[vram] %llu %x\n", static_cast<unsigned long long>(c.cycles * 10), data);
+            return;
         case 0x10000088:  // sound_reset_w: bit 0 low holds the DCS in reset
             combine(sound_reset_);
             ++stats.sound_writes;
@@ -251,6 +255,13 @@ uint32_t KinstBoard::ide_lba() const {
     return (cyl * logical_heads_ + (select_ & 0xf)) * logical_spt_ + sector_ - 1;
 }
 
+// MAME next_sector(): the head follows each sector of a multi-sector transfer,
+// so a read that continues where the previous one stopped needs no seek.
+void KinstBoard::track_head_position() {
+    uint32_t per_cyl = logical_heads_ * logical_spt_;
+    cur_cylinder_ = per_cyl ? lba_ / per_cyl : 0;
+}
+
 void KinstBoard::ide_load_sector() {
     uint64_t off = static_cast<uint64_t>(lba_) * 512;
     for (int i = 0; i < 256; ++i)
@@ -270,6 +281,7 @@ void KinstBoard::ide_finish_write_sector() {
     }
     ++stats.sectors_written;
     ++lba_;
+    if (sectors_left_ > 1) track_head_position();
     buffer_pos_ = 0;
     if (--sectors_left_ == 0) xfer_ = Xfer::None;
     start_busy(kUsec * 100, Pending::WriteDone);
@@ -278,8 +290,9 @@ void KinstBoard::ide_finish_write_sector() {
 void KinstBoard::ide_command(uint8_t cmd) {
     static const bool trace = std::getenv("KI_TRACE_IDE") != nullptr;
     if (trace)
-        std::fprintf(stderr, "[ide] cmd %02x sel %02x nsect %u sector %u cyl %u -> lba %u  frame %llu\n", cmd, select_,
-                     nsect_, sector_, hcyl_ << 8 | lcyl_, ide_lba(), static_cast<unsigned long long>(frame_));
+        std::fprintf(stderr, "[ide] cmd %02x sel %02x nsect %u sector %u cyl %u -> lba %u  frame %llu  cycle %llu\n", cmd,
+                     select_, nsect_, sector_, hcyl_ << 8 | lcyl_, ide_lba(), static_cast<unsigned long long>(frame_),
+                     static_cast<unsigned long long>(now_));
     ++stats.ide_commands;
     stats.last_ide_command = cmd;
     err_ = 0;
@@ -345,6 +358,7 @@ uint16_t KinstBoard::ide_read(int reg, bool status_clears_irq) {
                     status_ = kDrdy | kDsc;
                 } else {
                     ++lba_;
+                    track_head_position();
                     irq_ = false;
                     start_busy(kUsec * 4 / 10, Pending::ReadSector);
                 }

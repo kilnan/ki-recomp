@@ -153,7 +153,8 @@ def cmd_capture(args) -> int:
 
     exit_action = ";".join([regs_printf("KI_EXIT"), *saves("exit"), "quit"])
     if args.entry_only:
-        entry_action = ";".join([*inject, regs_printf("KI_ENTRY"), *saves("entry"), "quit"])
+        entry_action = ";".join([*inject, regs_printf("KI_ENTRY"), 'printf "KI_TOTALCYCLES %d",totalcycles',
+                                 *saves("entry"), "quit"])
     else:
         entry_action = ";".join([*inject, regs_printf("KI_ENTRY"), *saves("entry"),
                                  "temp1=sp", f"bpset ra,sp==temp1,{{{exit_action}}}", "g"])
@@ -177,6 +178,12 @@ def cmd_capture(args) -> int:
             print(f"missing registers {missing} in {name} line", file=sys.stderr)
             return 1
         (out / f"{name}_regs.txt").write_text("".join(f"{r} {regs[r]:016x}\n" for r in REGS))
+    total = next((l.split()[1] for l in lines if l.startswith("KI_TOTALCYCLES")), None)
+    if total is not None:
+        # Beam position for ki_run: the screen starts at time 0 and a VBLANK
+        # begins every 406 x 261 pixels of 16 CPU cycles (kinst.cpp set_raw).
+        frame = 406 * 261 * 16
+        (out / "screen.json").write_text(json.dumps({"to_vblank_ns": (frame - int(total) % frame) % frame * 10}) + "\n")
     meta = {
         "function": f"{args.func:08x}", "hit": args.hit, "when": args.when, "inject": inject,
         "mame": subprocess.run([args.mame, "-version"], capture_output=True, text=True).stdout.strip(),

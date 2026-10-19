@@ -42,7 +42,9 @@ reached by `jal`.
 | `tools/mame_run.py` | runs MAME with a wall-clock timeout; never leaves orphaned emulators |
 | `data/`, `traces/`, `poc/out/`, `build/` | **ignored by Git**: game data, captures, game-derived reports and generated code stay local |
 
-## Requirements (macOS arm64)
+## Requirements
+
+### macOS (arm64)
 
 ```sh
 xcode-select --install                 # Apple clang (C++20)
@@ -52,6 +54,22 @@ python3 -m venv .venv && .venv/bin/pip install rabbitizer==1.16.2
 
 `mips-linux-gnu-binutils` (Homebrew) is optional, for `objdump` listings.
 Tested with Apple clang 21, CMake 4.4, MAME 0.289, rabbitizer 1.16.2.
+
+### Linux
+
+Debian/Ubuntu: `apt install g++ cmake ninja-build python3-venv libsdl2-dev`, the
+same venv, and configure with `-DKI_PYTHON=.venv/bin/python`. Tested on Debian
+12 arm64 (GCC 12, CMake 3.25) in Docker, image definition in
+`tools/docker/Dockerfile.linux`:
+
+```sh
+docker build -t ki-linux -f tools/docker/Dockerfile.linux tools/docker
+docker run --rm -v "$PWD":/src:ro ki-linux sh -c \
+  'cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKI_PYTHON=/venv/bin/python && cmake --build /build && cd /build && ctest'
+```
+
+The Linux build gives the same audio and framebuffers as the macOS one, bit
+for bit (1200 frames of attract mode compared).
 
 ## Game data (not included, never committed)
 

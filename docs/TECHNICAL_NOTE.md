@@ -467,8 +467,8 @@ Pitfalls of MAME as an oracle (in addition to §4):
   that is the logical disk geometry.
 
 Still open:
-- **Timing.** Timing is approximate (1 cycle per instruction). The game measures
-  frame time with Count and adapts.
+- **Timing.** One cycle per instruction, which matches MAME's frame timing for
+  20.8 s of attract mode (§7e); one frame slips after that.
 - **Graphics fidelity.** Long sessions are not yet compared frame by frame with
   MAME. Single frames from mid-fight snapshots match except for a few hundred
   pixels (snapshot timing, see above).
@@ -530,6 +530,66 @@ costs about 0.5 s of host time per 20 s of game.
 
 `ki_play` queues the samples to SDL at 31250 Hz and slows its frame pacing
 slightly when more than about 60 ms of audio are queued.
+
+## 7e. Timing against MAME, and portability (19/10)
+
+**Method [O].** In a normal MAME run (no `-debug`), Lua write taps on I/O
+registers log emulated times. The attract mode is compared with `ki_run` started
+from the boot snapshot:
+- framebuffer flips (writes to 0x10000080, `KI_TRACE_VRAM=1`);
+- disk commands (`KI_TRACE_IDE=1`);
+- screen pixels every frame;
+- audio.
+
+Fixes, both general:
+- **VBLANK phase.** The boot snapshot had no beam position, so our frames were
+  about 9 ms out of phase with MAME's. `mame_capture.py --entry-only` and
+  `mame_snapshot.py` now compute it from the debugger's `totalcycles` at the
+  breakpoint (the screen starts at time 0; one frame is 406 x 261 pixels of 16
+  CPU cycles), and write `screen.json`.
+- **Disk head position.** MAME moves the head with every sector of a
+  multi-sector transfer (`next_sector()` updates `m_cur_lba`), so a read that
+  continues where the last one stopped costs 400 ns. We kept the head at the
+  first sector and charged a 1.3 ms seek. The disk model now tracks the head
+  per sector.
+
+**Results [O]:**
+- **Frame timing.** 512 framebuffer flips are within 1.2 µs of MAME's for the
+  first 20.8 s.
+- **Disk.** All disk commands within 30 µs up to the 52nd command.
+- **Screen.** The first 1,230 frames are identical pixel for pixel.
+- **Audio.** The first 21.77 s are identical.
+
+**One cycle per instruction.** MAME's DRC front end lists extra cycles for
+`mult` (3), `div` (35), `dmult` (7), `ddiv` (67) and for reading Count or Cause
+(`mips3fe.cpp`).
+- Adding the multiply/divide costs to the translator made the flips diverge
+  from MAME at 0.24 s instead of 20.8 s.
+- The Count/Cause costs changed nothing.
+- So the translator keeps one cycle per instruction, which is what matches.
+
+Why MAME's run does not show these costs is **[?]**.
+
+**Still open.** One frame slips at 20.84 s, in a stretch with no disk or sound
+access: our work between two flips takes at least 3.3 ms more than MAME's.
+- MAME traces cannot be used to find out why: with `-debug` MAME's own
+  timeline changes, so the same moment shows different frame numbers and flip
+  times.
+- The game keeps running correctly after the slip; the two runs are just one
+  frame apart.
+
+**Portability [O]:**
+- **Linux:** Debian 12 arm64, GCC 12, in Docker (`tools/docker/Dockerfile.linux`).
+  All 53 tests pass, and the `dcs_replay` comparison is 100% equal. 1200 frames
+  of `ki_run` give the same WAV and the same framebuffer as macOS, byte for byte.
+  - Needed: the generated-code libraries and the runtime depend on each other.
+    GNU ld resolves static libraries in one pass, so each code library is listed
+    again after the runtime (`ki_code_library()` in CMake).
+  - The 785 `-Wmisleading-indentation` warnings from GCC in generated code are fixed.
+- **Windows:** MinGW-w64 x86-64 cross-compiles everything except `ki_play`
+  (no SDL in that environment). The executables were not run.
+- **Negative control:** rerun after these changes, same result as §7 (10/10
+  caught, one known gap, two equivalent mutants).
 
 ## 8. Open questions
 
