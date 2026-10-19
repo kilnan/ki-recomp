@@ -570,8 +570,29 @@ Fixes, both general:
 
 Why MAME's run does not show these costs is **[?]**.
 
-**Still open.** One frame slips at 20.84 s, in a stretch with no disk or sound
-access: our work between two flips takes at least 3.3 ms more than MAME's.
+**Count as the DRC reads it.** The game's main loop is paced with Count:
+- 0x88029f70 stores Count at the start of a game frame in 0x8808f5d4;
+- 0x88029f84 waits until Count minus that value reaches the threshold in
+  0x8808f5cc (0xd1f60, about one frame), then the game waits for a VBLANK edge.
+- The random seed (0x8808f448) is `Count | 0xaaaaaaaa`, read at 0x8802aab0
+  during init.
+
+MAME's DRC counts the cycles of the block up to and including the
+reading instruction (`generate_get_cop0_reg`), and Count/Cause reads take 2
+cycles. Our translator now does the same, flushing the pending cycles of the
+block before `mfc0 Count` and `mtc0 Count/Compare/Status`.
+- Per-frame DRAM dumps (Lua `read_range` in a normal run, `ki_run --dram-frames`)
+  show the frame-start Count within 0-4 counts of MAME's, where it was 1-5
+  before. The seed is closer but not equal (0xbbfaafea against 0xbbfaafbb).
+- Taking interrupts at every branch instead of only at backward jumps and
+  function entries changes nothing.
+
+**Still open.** One frame slips at 20.84 s, in a stretch with no disk, sound or
+EPROM access. MAME's game frame at 1607-1609 ends 3.3 ms before a VBLANK; ours
+ends in the next frame. The state just before is identical apart from
+work-in-progress areas. So the slip is probably a boundary effect: the
+remaining few-cycle differences in when Count is read and when VBLANK is seen
+decide on which side of a frame edge the wait ends. This is **[H]**.
 - MAME traces cannot be used to find out why: with `-debug` MAME's own
   timeline changes, so the same moment shows different frame numbers and flip
   times.

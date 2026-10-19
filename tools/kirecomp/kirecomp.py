@@ -132,6 +132,19 @@ def has_delay_slot(i: Insn) -> bool:
     return i.name in CONDITIONAL_BRANCHES or i.name in JUMPS
 
 
+COP0_COUNT, COP0_COMPARE, COP0_STATUS, COP0_CAUSE = 9, 11, 12, 13
+
+
+def cycles_of(i: Insn) -> int:
+    """Cycles of an instruction as MAME's MIPS III DRC counts them for this game:
+    one, plus one for reading Count or Cause (mips3fe.cpp). The DRC front end
+    also lists multiply/divide latencies, but adding them makes the timing
+    diverge from MAME's run (TECHNICAL_NOTE 7e), so they are left out."""
+    if i.name in ("mfc0", "dmfc0") and i.rd in (COP0_COUNT, COP0_CAUSE):
+        return 2
+    return 1
+
+
 def _resolve_const(img: Image, reg: int, pc: int, lo: int) -> int | None:
     """Value of `reg` just before `pc`, if it is built by lui/addiu/ori in the
     straight-line code between `lo` and `pc` (no branch targets are checked:
@@ -571,7 +584,18 @@ class Translator:
             if i.vaddr in targets:
                 label(f"L_{i.vaddr:08x}")
             if not has_delay_slot(i):
-                pending[0] += 1
+                if self.timing and i.name in ("mfc0", "dmfc0", "mtc0", "dmtc0") and i.rd in (
+                        COP0_COUNT, COP0_COMPARE, COP0_STATUS):
+                    # As the DRC (generate_get/set_cop0_reg): these see the cycle
+                    # counter up to this instruction. Reading Count also counts this
+                    # instruction's first cycle, writing Count does not, writing
+                    # Compare or Status does.
+                    before = 0 if i.name in ("mtc0", "dmtc0") and i.rd == COP0_COUNT else 1
+                    pending[0] += before
+                    flush()
+                    pending[0] += cycles_of(i) - before
+                else:
+                    pending[0] += cycles_of(i)
                 if i.name == "eret":
                     flush()
                 emit(self.simple(i), i)
@@ -602,7 +626,7 @@ class Translator:
                 continue
             ret = u32(i.vaddr + 8)
             dslot = lambda: emit("    " + self.simple(d), d)  # noqa: E731
-            pending[0] += 2
+            pending[0] += 1 + cycles_of(d)
             flush()
             if i.name in CONDITIONAL_BRANCHES:
                 t = i.branch_target
@@ -696,7 +720,7 @@ class Translator:
                 # Fall-through past the branch sequence skips the standalone copy.
                 emit(f"goto L_{d.vaddr:08x}_skip;")
                 label(f"L_{d.vaddr:08x}")
-                pending[0] += 1
+                pending[0] += cycles_of(d)
                 emit(self.simple(d), d)
                 fall_through(d.vaddr + 4, idx + 2, d.vaddr)
                 label(f"L_{d.vaddr:08x}_skip")

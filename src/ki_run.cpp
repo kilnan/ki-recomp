@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
     static uint64_t trace_max = 1000000;
     static std::string dump_dir;
     uint64_t frames = 600, dump_every = 60;
+    static uint64_t dram_from = ~0ull, dram_to = 0;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i], v = argv[i + 1];
         if (k == "--boot") boot = v;
@@ -63,6 +64,11 @@ int main(int argc, char** argv) {
         else if (k == "--trace-max") trace_max = std::stoull(v);
         else if (k == "--sound-roms") sound_roms = v;
         else if (k == "--wav-out") wav_out = v;
+        else if (k == "--dram-frames") {  // A-B: write DRAM at each VBLANK of frames A..B (dram_<frame>.bin)
+            size_t dash = v.find('-');
+            dram_from = std::stoull(v.substr(0, dash));
+            dram_to = dash == std::string::npos ? dram_from : std::stoull(v.substr(dash + 1));
+        }
     }
     if (boot.empty() || disk.empty() || rom.empty()) {
         std::fprintf(stderr, "usage: %s --boot <dir> --disk <img> --rom <u98> [--frames N] [--dump-every K] [--out dir]\n",
@@ -109,6 +115,14 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
         if (frame == call_log_from) ctx.call_log = &call_log;
+        if (frame >= dram_from && frame <= dram_to) {
+            char name[64];
+            std::snprintf(name, sizeof name, "/dram_%05llu.bin", static_cast<unsigned long long>(frame));
+            if (FILE* f = std::fopen((out + name).c_str(), "wb")) {
+                std::fwrite(ctx.dram.data(), 1, ctx.dram.size(), f);
+                std::fclose(f);
+            }
+        }
         while (next_event < script.size() && script[next_event].frame <= frame) {
             const Event& e = script[next_event++];
             uint32_t& port = e.port == 1 ? board.p1 : board.p2;
