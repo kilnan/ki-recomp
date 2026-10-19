@@ -98,8 +98,18 @@ codesign --force --deep --sign - "$APP"
 # start with deps-macos/ out of the way (loads only its own SDL).
 mv "$DEPS" "$DEPS.hidden"
 trap 'mv "$DEPS.hidden" "$DEPS"' EXIT
-loaded=$( (DYLD_PRINT_LIBRARIES=1 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
-    "$APP/Contents/MacOS/KIRecompiled" --mute 2>&1 & pid=$!; sleep 3; kill $pid) | grep -i sdl || true)
+probe=$DIST/dyld.log
+DYLD_PRINT_LIBRARIES=1 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+    "$APP/Contents/MacOS/KIRecompiled" --mute > "$probe" 2>&1 &
+pid=$!
+for i in {1..30}; do
+    grep -q "libSDL3" "$probe" && break
+    sleep 0.5
+done
+kill $pid 2>/dev/null || true
+wait $pid 2>/dev/null || true
+loaded=$(grep -i sdl "$probe" || true)
+rm -f "$probe"
 echo "$loaded"
 if ! echo "$loaded" | grep -q "KIRecompiled.app/Contents/Frameworks/libSDL3"; then
     echo "error: the app does not load its own SDL3" >&2
