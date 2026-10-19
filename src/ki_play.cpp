@@ -87,9 +87,12 @@ int main(int argc, char** argv) {
         SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 320, 240);
 
     static ki::Context c;
-    uint32_t entry = ki::load_boot_state(c, boot);
+    // --boot rom: start at the reset vector, like the real board (needs no MAME snapshot).
+    const bool cold = boot == "rom";
+    uint32_t entry = cold ? ki::cold_reset(c) : ki::load_boot_state(c, boot);
     static ki::KinstBoard board(ki::read_file_or_die(disk), ki::read_file_or_die(rom));
     c.io = &board;
+    if (cold) board.set_cycles_to_vblank(0);
     static std::unique_ptr<ki::Dcs> dcs;
     SDL_AudioDeviceID audio = 0;
     if (!sound_roms.empty()) {

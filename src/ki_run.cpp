@@ -71,7 +71,9 @@ int main(int argc, char** argv) {
     }
 
     static ki::Context c;
-    uint32_t entry = ki::load_boot_state(c, boot);
+    // --boot rom: start at the reset vector, like the real board (needs no MAME snapshot).
+    const bool cold = boot == "rom";
+    uint32_t entry = cold ? ki::cold_reset(c) : ki::load_boot_state(c, boot);
     static ki::KinstBoard board(ki::read_file_or_die(disk), ki::read_file_or_die(rom));
     c.io = &board;
     static std::unique_ptr<ki::Dcs> dcs;
@@ -81,7 +83,8 @@ int main(int argc, char** argv) {
         dcs = std::make_unique<ki::Dcs>(ki::read_sound_roms_or_die(sound_roms));
         board.dcs = dcs.get();
     }
-    if (entry != 0x88000000u) board.set_logical_geometry(14, 40);  // set by the boot code (IDE command 0x91)
+    if (cold) board.set_cycles_to_vblank(0);  // MAME's screen starts a VBLANK at time 0 (every frame since)
+    else if (entry != 0x88000000u) board.set_logical_geometry(14, 40);  // set by the boot code (IDE command 0x91)
     {
         std::ifstream scr(boot + "/screen.json");  // mid-game snapshots record the beam position
         std::string text((std::istreambuf_iterator<char>(scr)), std::istreambuf_iterator<char>());

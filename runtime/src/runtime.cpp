@@ -9,11 +9,28 @@ void raise_fault(Context&, Fault fault, uint32_t pc, uint32_t addr) {
     throw GuestFault{fault, pc, addr};
 }
 
-RecompFunc lookup_function(uint32_t vaddr) {
-    const FuncEntry* end = kFunctionTable + kFunctionTableSize;
-    const FuncEntry* it = std::lower_bound(kFunctionTable, end, vaddr,
-                                           [](const FuncEntry& e, uint32_t v) { return e.vaddr < v; });
+namespace {
+const FuncEntry* boot_table = nullptr;
+std::size_t boot_table_size = 0;
+
+RecompFunc find(const FuncEntry* table, std::size_t size, uint32_t vaddr) {
+    const FuncEntry* end = table + size;
+    const FuncEntry* it =
+        std::lower_bound(table, end, vaddr, [](const FuncEntry& e, uint32_t v) { return e.vaddr < v; });
     return (it != end && it->vaddr == vaddr) ? it->fn : nullptr;
+}
+}  // namespace
+
+void set_boot_function_table(const FuncEntry* table, std::size_t size) {
+    boot_table = table;
+    boot_table_size = size;
+}
+
+RecompFunc lookup_function(uint32_t vaddr) {
+    if (RecompFunc fn = find(kFunctionTable, kFunctionTableSize, vaddr)) return fn;
+    if (!boot_table) return nullptr;
+    if ((vaddr & 0xfff00000u) == 0x9fc00000u) vaddr |= 0x20000000u;  // KSEG0 view of the EPROM
+    return find(boot_table, boot_table_size, vaddr);
 }
 
 void call_indirect(Context& c, uint32_t target, uint32_t pc) {
@@ -86,9 +103,11 @@ uint64_t lwr(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc) {
     return sx32((lo32(rt) & ~mask) | (word >> shift));
 }
 
+// Only the 32-bit halves the instruction uses are read, as MAME's bus does
+// with a partial mask: on I/O (the EPROM's wait states) the count matters.
 uint64_t ldl(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc) {
     unsigned k = vaddr & 7;
-    uint64_t dword = load<uint64_t>(c, vaddr & ~7u, pc);
+    uint64_t dword = k <= 3 ? load<uint32_t>(c, vaddr & ~7u, pc) : load<uint64_t>(c, vaddr & ~7u, pc);
     unsigned shift = 8 * (7 - k);
     uint64_t mask = ~0ull << shift;
     return (rt & ~mask) | (dword << shift);
@@ -96,7 +115,8 @@ uint64_t ldl(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc) {
 
 uint64_t ldr(Context& c, uint64_t rt, uint32_t vaddr, uint32_t pc) {
     unsigned k = vaddr & 7;
-    uint64_t dword = load<uint64_t>(c, vaddr & ~7u, pc);
+    uint64_t dword = k >= 4 ? static_cast<uint64_t>(load<uint32_t>(c, (vaddr & ~7u) + 4, pc)) << 32
+                            : load<uint64_t>(c, vaddr & ~7u, pc);
     unsigned shift = 8 * k;
     uint64_t mask = ~0ull >> shift;
     return (rt & ~mask) | (dword >> shift);

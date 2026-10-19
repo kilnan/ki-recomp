@@ -78,14 +78,21 @@ class Insn:
 
 
 class Image:
-    def __init__(self, data: bytes, vram: int):
+    def __init__(self, data: bytes, vram: int, code_size: int | None = None):
         if len(data) % 4:
             raise TranslateError("image size is not a multiple of 4")
-        self.data = data
-        self.vram = vram
         self.sha1 = hashlib.sha1(data).hexdigest()
-
+        # Only the first code_size bytes are code (the boot EPROM is followed by
+        # compressed data); the rest stays readable as data.
+        self.data = data[:code_size] if code_size else data
+        self.vram = vram
+        if code_size:
+            self.extra_full = (vram, data)
+        self.alias_base: int | None = None  # the same code also runs from this address
         self.extra: list[tuple[int, bytes]] = []  # read-only data images (jump tables)
+
+    def alias(self, vaddr: int) -> int:
+        return vaddr - self.vram + self.alias_base
 
     def add_data(self, data: bytes, vram: int):
         self.extra.append((vram, data))
@@ -94,7 +101,8 @@ class Image:
         return self.vram <= vaddr < self.vram + len(self.data)
 
     def read_word(self, vaddr: int) -> int | None:
-        for base, blob in [(self.vram, self.data), *self.extra]:
+        full = [self.extra_full] if hasattr(self, "extra_full") else []
+        for base, blob in [(self.vram, self.data), *full, *self.extra]:
             if base <= vaddr and vaddr + 4 <= base + len(blob):
                 return struct.unpack_from("<I", blob, vaddr - base)[0]
         return None
@@ -511,7 +519,7 @@ class Translator:
         out = [f"void func_{fn.start:08x}(ki::Context& c) {{",
                f"    // guest 0x{fn.start:08x}-0x{fn.end:08x} ({len(insns)} instructions)",
                "    bool br = false;", "    (void)br;", "    (void)c;"]
-        uses_entry_ra = any(i.name == "jr" and i.rs != 31 for i in insns)
+        uses_entry_ra = bool(return_sites) or any(i.name == "jr" and i.rs != 31 for i in insns)
         if uses_entry_ra:
             # Return address the caller passed in $ra: hand-written code also
             # returns through other registers (e.g. `move a1,ra ... jr a1`).
@@ -640,7 +648,12 @@ class Translator:
                     emit("  switch (tgt) {")
                     for t in return_sites:
                         emit(f"    case {u32(t)}: goto L_{t:08x};")
-                    emit("    default: return;  // the external caller (as for any `jr $ra`)")
+                        if self.img.alias_base is not None:  # same code at its other address (KSEG0/KSEG1)
+                            emit(f"    case {u32(self.img.alias(t))}: goto L_{t:08x};")
+                    # The caller passed this $ra in; any other value is a jump (the boot
+                    # ROM sets $ra to the game's entry point before its final `jr $ra`).
+                    emit("    default: if (tgt == entry_ra) return;")
+                    emit(f"             ki::tail_indirect(c, tgt, {u32(i.vaddr)}); return;")
                     emit("  } }")
                 elif i.rs == 31:
                     # Assumes $ra still holds the caller's return address, as
@@ -812,6 +825,14 @@ def main(argv: list[str]) -> int:
                          "lui/addiu in code (function pointers), excluding recognised jump-table cases")
     ap.add_argument("--data", action="append", default=[], metavar="FILE@VRAM",
                     help="read-only data image (for jump tables); repeatable")
+    ap.add_argument("--code-size", type=lambda x: int(x, 0),
+                    help="only the first N bytes of the image are code (the rest is data)")
+    ap.add_argument("--alias", type=lambda x: int(x, 16),
+                    help="the image also executes from this address (e.g. 9fc00000, the cached view of "
+                         "the boot EPROM at bfc00000): return sites accept both")
+    ap.add_argument("--table-symbol", default="kFunctionTable",
+                    help="name of the emitted address -> function table (kFunctionTable for the game, "
+                         "kBootFunctionTable for the boot ROM)")
     ap.add_argument("--expect-sha1", help="refuse to translate a different image")
     ap.add_argument("--allow-unimplemented", action="store_true")
     out = ap.add_mutually_exclusive_group(required=True)
@@ -825,7 +846,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--listing", help="optional text listing of translated functions")
     args = ap.parse_args(argv)
 
-    img = Image(open(args.image, "rb").read(), args.vram)
+    img = Image(open(args.image, "rb").read(), args.vram, args.code_size)
+    img.alias_base = args.alias
     if args.expect_sha1 and img.sha1 != args.expect_sha1.lower():
         print(f"image sha1 {img.sha1} != expected {args.expect_sha1}", file=sys.stderr)
         return 2
@@ -921,11 +943,12 @@ def main(argv: list[str]) -> int:
         *[f"void func_{fn.start:08x}(ki::Context& c);" for fn in funcs],
         "}  // namespace ki::gen", "",
     ]
+    sym = args.table_symbol
     table = [
-        "const ki::FuncEntry ki::kFunctionTable[] = {",
+        f"const ki::FuncEntry ki::{sym}[] = {{",
         *[f"    {{0x{fn.start:08x}u, ki::gen::func_{fn.start:08x}}}," for fn in funcs],
         "};",
-        f"const std::size_t ki::kFunctionTableSize = {len(funcs)};", "",
+        f"const std::size_t ki::{sym}Size = {len(funcs)};", "",
     ]
     if args.out_dir:
         # Split into N translation units (balanced by instruction count) so the

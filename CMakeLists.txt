@@ -127,6 +127,28 @@ if(KI_BUILD_FULL)
   if(NOT MSVC)
     target_compile_options(ki_full_code PRIVATE -O1 -Wno-unused-parameter)
   endif()
+  # The boot EPROM's own code (reset vector, hardware init, the decompressor
+  # that unpacks the game into DRAM), so the program can start from the
+  # player's ROM instead of a MAME snapshot (ki_run/ki_play --boot rom).
+  set(KI_BOOT_ROM_IMAGE "${CMAKE_SOURCE_DIR}/data/roms/kinst/ki-l15d.u98" CACHE FILEPATH
+      "KI 1 boot EPROM U98, L1.5D (the code at its start runs at 0xbfc00000)")
+  set(KI_BOOT_ROM_SHA1 "607394d4ba1713f38c2cb5159303cace9cde991e" CACHE STRING "expected SHA1 of KI_BOOT_ROM_IMAGE")
+  set(BOOT_GEN "${CMAKE_BINARY_DIR}/gen_boot/boot_recompiled.cpp")
+  add_custom_command(
+    OUTPUT "${BOOT_GEN}"
+    COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
+            --image "${KI_BOOT_ROM_IMAGE}" --vram bfc00000 --alias 9fc00000 --code-size 0xe48
+            --expect-sha1 ${KI_BOOT_ROM_SHA1} --func bfc00000 --discover
+            --table-symbol kBootFunctionTable --out "${BOOT_GEN}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_BOOT_ROM_IMAGE}"
+    COMMENT "Recompiling the boot ROM"
+    VERBATIM)
+  add_library(ki_boot_rom_code STATIC "${BOOT_GEN}")
+  ki_code_library(ki_boot_rom_code)
+  if(NOT MSVC)
+    target_compile_options(ki_boot_rom_code PRIVATE -O1 -Wno-unused-parameter)
+  endif()
+
   # compare_case against the whole program and the board model (for captures of
   # functions that call other code or touch I/O).
   add_executable(compare_full tests/compare_case.cpp)
@@ -157,11 +179,11 @@ if(KI_BUILD_FULL)
       target_compile_options(ki_trace_code PRIVATE -O1 -Wno-unused-parameter)
     endif()
     add_executable(ki_run_trace src/ki_run.cpp src/ki_boot.cpp)
-    target_link_libraries(ki_run_trace PRIVATE ki_trace_code)
+    target_link_libraries(ki_run_trace PRIVATE ki_boot_rom_code ki_trace_code)
   endif()
 
   add_library(ki_boot STATIC src/ki_boot.cpp)
-  target_link_libraries(ki_boot PUBLIC ki_runtime)
+  target_link_libraries(ki_boot PUBLIC ki_boot_rom_code ki_runtime)
   add_executable(ki_run src/ki_run.cpp)
   target_link_libraries(ki_run PRIVATE ki_boot ki_full_code)
 

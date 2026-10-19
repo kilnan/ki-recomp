@@ -140,9 +140,11 @@ uint32_t KinstBoard::reg32_read(Context& c, uint32_t a) {
         default: break;
     }
     if (a >= 0x10000100 && a < 0x10000140) return ide_read((a - 0x10000100) / 8, true);
-    if (a >= 0x1fc00000 && a < 0x1fc00000 + rom_.size())
+    if (a >= 0x1fc00000 && a < 0x1fc00000 + rom_.size()) {
+        c.cycles += 128;  // RdRdy wait states on every EPROM read (kinst.cpp rom_r)
         return rom_[a - 0x1fc00000] | rom_[a - 0x1fc00000 + 1] << 8 | rom_[a - 0x1fc00000 + 2] << 16 |
                static_cast<uint32_t>(rom_[a - 0x1fc00000 + 3]) << 24;
+    }
     ++stats.unknown_io;
     return 0xffffffff;  // unmap_value_high
 }

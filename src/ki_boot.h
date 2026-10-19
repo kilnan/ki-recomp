@@ -17,6 +17,10 @@ void write_wav(const std::string& path, const std::vector<int16_t>& samples, uin
 // Loads a boot-state snapshot (tools/mame_capture.py --entry-only at
 // 0x88000000): registers, COP0, FPU, SRAM and DRAM. Returns the entry address.
 uint32_t load_boot_state(Context& c, const std::string& dir);
+// Power-on state of the CPU (MAME mips3 reset: Status = BEV | ERL, everything
+// else zero) with empty RAM, and the boot ROM's code installed: the program
+// then starts at the reset vector 0xbfc00000 like the real board. Returns it.
+uint32_t cold_reset(Context& c);
 // Calls the recompiled entry. Returns false (after printing the state) on a guest fault.
 bool run_entry(Context& c, uint32_t entry);
 

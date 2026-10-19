@@ -108,6 +108,12 @@ struct FuncEntry {
 // Defined by generated code.
 extern const FuncEntry kFunctionTable[];
 extern const std::size_t kFunctionTableSize;
+// The boot EPROM's code (generated separately, --table-symbol kBootFunctionTable).
+// An executable that starts from the reset vector installs it with
+// set_boot_function_table(); lookups also accept its cached alias 0x9fcxxxxx.
+extern const FuncEntry kBootFunctionTable[];
+extern const std::size_t kBootFunctionTableSize;
+void set_boot_function_table(const FuncEntry* table, std::size_t size);
 RecompFunc lookup_function(uint32_t vaddr);
 
 inline void tail(Context& c, RecompFunc fn) { c.tail_fn = fn; }

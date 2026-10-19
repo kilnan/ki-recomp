@@ -68,6 +68,13 @@ uint32_t load_boot_state(Context& c, const std::string& dir) {
     return lo32(regs.at("pc"));
 }
 
+uint32_t cold_reset(Context& c) {
+    c = Context{};
+    c.cp0[kCp0Status] = 0x00400004;  // BEV | ERL
+    set_boot_function_table(kBootFunctionTable, kBootFunctionTableSize);
+    return 0xbfc00000u;
+}
+
 bool run_entry(Context& c, uint32_t entry) {
     RecompFunc fn = lookup_function(entry);
     if (!fn) {
