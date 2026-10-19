@@ -5,9 +5,10 @@ Exploratory static recompilation of **Killer Instinct** (Rare/Midway arcade,
 host and a portable runtime (C++20, CMake; SDL2 only for the windowed player).
 
 Current state: the whole game is recompiled and plays natively, with sound, in
-a window or headless. Attract mode, coin, character select, fights, game over
-and high scores all work. The DCS sound board (an ADSP-2105 DSP) is emulated;
-its output matches MAME sample for sample. Real game code is translated automatically
+a window or headless. It starts from the player's MAME set like the arcade
+board: the boot ROM is recompiled too and unpacks the game. Attract mode, coin,
+character select, fights, game over and high scores all work. The DCS sound
+board (an ADSP-2105 DSP) is emulated; its output matches MAME sample for sample. Real game code is translated automatically
 from MIPS to C++. The validated code is six functions (FPU code, a `switch` with
 a jump table, integer code) and the whole call subtree of a drawing routine,
 which writes to the framebuffer. All of it matches MAME bit for bit (CPU and FPU
