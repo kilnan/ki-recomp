@@ -3,6 +3,7 @@
 // Register map and behaviour follow MAME src/mame/rare/kinst.cpp (kinst_map).
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -49,6 +50,12 @@ public:
     // Inputs (active low, all released = 0xffffffff), see kinst.cpp ports.
     uint32_t p1 = 0xffffffff, p2 = 0xffffffff, dsw = 0xffffffff;
 
+    // The disk as the game has written it, and which sectors it wrote (settings,
+    // high scores), so a player can keep them between sessions.
+    const std::vector<uint8_t>& disk() const { return disk_; }
+    const std::vector<uint32_t>& written_sectors() const { return written_; }
+    uint64_t disk_writes() const { return stats.sectors_written; }
+
     // Optional I/O access histogram (address -> count), enabled by io_histogram_on.
     bool io_histogram_on = false;
     std::vector<std::pair<uint32_t, uint64_t>> io_histogram() const;
@@ -73,6 +80,7 @@ private:
     void build_identify();
 
     std::vector<uint8_t> disk_, rom_;
+    std::vector<uint32_t> written_;  // sorted, unique
     std::vector<uint64_t> io_reads_ = std::vector<uint64_t>(0x200), io_writes_ = std::vector<uint64_t>(0x200);
     uint64_t frame_ = 0, next_vblank_ = kVblankStart, phase_ = 0;
     bool trace_vram_ = std::getenv("KI_TRACE_VRAM") != nullptr;

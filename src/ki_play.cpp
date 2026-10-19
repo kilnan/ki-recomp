@@ -1,13 +1,20 @@
 // Plays the recompiled Killer Instinct program in a window (SDL2).
 //
-// usage: ki_play --boot <dir> --disk <kinst.img> --rom <ki-l15d.u98> [--scale N]
-//                [--sound-roms <dir>] [--mute]
+// usage: ki_play [--data <dir>] [--scale N] [--mute]
+//        ki_play --boot <snapshot dir|rom> --disk <kinst.img> --rom <ki-l15d.u98>
+//                [--sound-roms <dir>] [--scale N] [--mute]      (development)
+//
+// Normally the program starts like the arcade board, at the reset vector,
+// from the player's MAME `kinst` set: a folder with kinst.zip (or its files)
+// and kinst.chd, given with --data, dropped onto the window, or remembered
+// from the last run. Every file is checked against MAME's SHA1. Sectors the
+// game writes (settings, high scores) are kept in the user's preferences
+// folder and put back on the next start.
 //
 // The guest runs on the main thread; at every VBLANK the board callback
 // presents the framebuffer, reads input, queues the DCS samples produced
 // during the frame and paces emulation to the arcade's refresh rate
-// (6.25 MHz / (406 x 261) = 58.98 Hz). The sound ROMs (u10-l1 ... u36-l1)
-// are looked up next to --rom unless --sound-roms is given.
+// (6.25 MHz / (406 x 261) = 58.98 Hz).
 //
 // Keys (player 1): arrows move, A S D = high quick/medium/fierce,
 // Z X C = low quick/medium/fierce, 1 = start, 5 = coin.
@@ -15,16 +22,24 @@
 // (test switch), Esc quits, Tab toggles unthrottled speed (no sound while on).
 #include <SDL.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "ki/kinst_board.h"
 #include "ki/runtime.h"
 #include "ki_boot.h"
+#ifdef KI_HAVE_FILES
+#include "ki_files.h"
+#endif
 
 namespace {
 
@@ -48,55 +63,181 @@ const KeyBit kKeys[] = {
 };
 
 constexpr double kFrameSeconds = 1.0 / (6.25e6 / (406.0 * 261.0));
+constexpr const char* kTitle = "Killer Instinct (recompiled)";
+
+std::string pref_path() {
+    char* p = SDL_GetPrefPath("kilnan", "KIRecompiled");
+    std::string s = p ? p : "./";
+    SDL_free(p);
+    return s;
+}
+
+std::string read_text(const std::string& path) {
+    std::ifstream f(path);
+    std::string s;
+    std::getline(f, s);
+    return s;
+}
+
+void write_text(const std::string& path, const std::string& text) {
+    std::ofstream f(path);
+    f << text << "\n";
+}
+
+// Disk sectors written by the game: [u32 lba][512 bytes] records.
+void apply_saved_sectors(const std::string& path, std::vector<uint8_t>& disk) {
+    std::ifstream f(path, std::ios::binary);
+    uint8_t rec[4 + 512];
+    while (f.read(reinterpret_cast<char*>(rec), sizeof rec)) {
+        uint32_t lba = rec[0] | rec[1] << 8 | rec[2] << 16 | static_cast<uint32_t>(rec[3]) << 24;
+        if ((static_cast<uint64_t>(lba) + 1) * 512 <= disk.size()) std::memcpy(&disk[lba * 512ull], rec + 4, 512);
+    }
+}
+
+void save_sectors(const std::string& path, const ki::KinstBoard& board, const std::vector<uint32_t>& earlier) {
+    std::vector<uint32_t> all = earlier;
+    all.insert(all.end(), board.written_sectors().begin(), board.written_sectors().end());
+    std::sort(all.begin(), all.end());
+    all.erase(std::unique(all.begin(), all.end()), all.end());
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary);
+        for (uint32_t lba : all) {
+            uint8_t head[4] = {static_cast<uint8_t>(lba), static_cast<uint8_t>(lba >> 8),
+                               static_cast<uint8_t>(lba >> 16), static_cast<uint8_t>(lba >> 24)};
+            f.write(reinterpret_cast<const char*>(head), 4);
+            f.write(reinterpret_cast<const char*>(&board.disk()[lba * 512ull]), 512);
+        }
+    }
+    std::rename(tmp.c_str(), path.c_str());
+}
+
+std::vector<uint32_t> saved_lbas(const std::string& path) {
+    std::vector<uint32_t> out;
+    std::ifstream f(path, std::ios::binary);
+    uint8_t rec[4 + 512];
+    while (f.read(reinterpret_cast<char*>(rec), sizeof rec))
+        out.push_back(rec[0] | rec[1] << 8 | rec[2] << 16 | static_cast<uint32_t>(rec[3]) << 24);
+    return out;
+}
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string boot, disk, rom, sound_roms;
+    std::string boot, disk, rom, sound_roms, data;
     int scale = 3;
     bool mute = false;
-    for (int i = 1; i + 1 < argc; i += 2) {
-        std::string k = argv[i], v = argv[i + 1];
+    for (int i = 1; i < argc; ++i) {
+        std::string k = argv[i];
+        if (k == "--mute") { mute = true; continue; }
+        if (i + 1 >= argc) break;
+        std::string v = argv[++i];
         if (k == "--boot") boot = v;
         else if (k == "--disk") disk = v;
         else if (k == "--rom") rom = v;
         else if (k == "--scale") scale = std::stoi(v);
         else if (k == "--sound-roms") sound_roms = v;
+        else if (k == "--data") data = v;
     }
-    for (int i = 1; i < argc; ++i)
-        if (std::string(argv[i]) == "--mute") mute = true;
-    if (boot.empty() || disk.empty() || rom.empty()) {
-        std::fprintf(stderr, "usage: %s --boot <dir> --disk <img> --rom <u98> [--scale N]\n", argv[0]);
-        return 2;
-    }
-    if (sound_roms.empty()) {
-        size_t slash = rom.find_last_of('/');
-        sound_roms = slash == std::string::npos ? "." : rom.substr(0, slash);
-    }
-    if (FILE* f = std::fopen((sound_roms + "/u10-l1").c_str(), "rb")) std::fclose(f);
-    else sound_roms.clear();  // no sound ROMs: run silent
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
-    SDL_Window* window = SDL_CreateWindow("Killer Instinct (recompiled)", SDL_WINDOWPOS_CENTERED,
-                                          SDL_WINDOWPOS_CENTERED, 320 * scale, 240 * scale, SDL_WINDOW_RESIZABLE);
+    SDL_Window* window = SDL_CreateWindow(kTitle, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 320 * scale,
+                                          240 * scale, SDL_WINDOW_RESIZABLE);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     SDL_RenderSetLogicalSize(renderer, 320, 240);
     SDL_Texture* texture =
         SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 320, 240);
 
+    // ---- the game's files ----
+    std::vector<uint8_t> disk_image, boot_rom;
+    std::vector<std::vector<uint8_t>> sound;
+    const bool dev = !boot.empty();
+    std::string saves;  // file with the sectors the game wrote (player mode only)
+    std::vector<uint32_t> earlier_saves;
+    if (dev) {
+        if (disk.empty() || rom.empty()) {
+            std::fprintf(stderr, "usage: %s --boot <dir|rom> --disk <img> --rom <u98> [--sound-roms <dir>]\n", argv[0]);
+            return 2;
+        }
+        disk_image = ki::read_file_or_die(disk);
+        boot_rom = ki::read_file_or_die(rom);
+        if (sound_roms.empty()) {
+            size_t slash = rom.find_last_of('/');
+            sound_roms = slash == std::string::npos ? "." : rom.substr(0, slash);
+        }
+        if (FILE* f = std::fopen((sound_roms + "/u10-l1").c_str(), "rb")) {
+            std::fclose(f);
+            sound = ki::read_sound_roms_or_die(sound_roms);
+        }
+    } else {
+#ifdef KI_HAVE_FILES
+        const std::string prefs = pref_path();
+        if (data.empty()) data = read_text(prefs + "data_dir.txt");
+        ki::GameFiles files;
+        std::string error;
+        bool ok = !data.empty() && ki::load_game_files(data, files, error);
+        if (!ok) {
+            std::string msg =
+                (data.empty() ? std::string("Drag the folder with your MAME 'kinst' set onto this window.")
+                              : "The game files in " + data + " cannot be used:\n" + error +
+                                    "\n\nDrag another folder onto this window.") +
+                "\n\nThe folder must contain kinst.zip (BIOS v1.5d) and kinst.chd.";
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, kTitle, msg.c_str(), window);
+            SDL_SetWindowTitle(window, "Killer Instinct (recompiled): drop the kinst folder here");
+            SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+            while (!ok) {
+                SDL_RenderClear(renderer);
+                SDL_RenderPresent(renderer);
+                SDL_Event ev;
+                if (!SDL_WaitEvent(&ev)) continue;
+                if (ev.type == SDL_QUIT) return 0;
+                if (ev.type != SDL_DROPFILE) continue;
+                std::string dropped = ev.drop.file;
+                SDL_free(ev.drop.file);
+                // A dropped file (kinst.zip, kinst.chd) stands for its folder.
+                if (!ki::load_game_files(dropped, files, error)) {
+                    size_t slash = dropped.find_last_of('/');
+                    std::string parent = slash == std::string::npos ? dropped : dropped.substr(0, slash);
+                    std::string e2;
+                    if (ki::load_game_files(parent, files, e2)) dropped = parent;
+                    else {
+                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, kTitle, error.c_str(), window);
+                        continue;
+                    }
+                }
+                data = dropped;
+                ok = true;
+            }
+            SDL_SetWindowTitle(window, kTitle);
+        }
+        std::error_code ec;
+        std::string absolute = std::filesystem::absolute(data, ec).lexically_normal().string();
+        write_text(prefs + "data_dir.txt", ec ? data : absolute);
+        disk_image = std::move(files.disk);
+        boot_rom = std::move(files.boot_rom);
+        sound = std::move(files.sound_roms);
+        saves = prefs + "disk_writes.bin";
+        earlier_saves = saved_lbas(saves);
+        apply_saved_sectors(saves, disk_image);
+#else
+        std::fprintf(stderr, "built without KI_WITH_CHD: use --boot/--disk/--rom\n");
+        return 2;
+#endif
+    }
+
     static ki::Context c;
-    // --boot rom: start at the reset vector, like the real board (needs no MAME snapshot).
-    const bool cold = boot == "rom";
+    // --boot rom (and player mode): start at the reset vector, like the real board.
+    const bool cold = !dev || boot == "rom";
     uint32_t entry = cold ? ki::cold_reset(c) : ki::load_boot_state(c, boot);
-    static ki::KinstBoard board(ki::read_file_or_die(disk), ki::read_file_or_die(rom));
+    static ki::KinstBoard board(std::move(disk_image), std::move(boot_rom));
     c.io = &board;
     if (cold) board.set_cycles_to_vblank(0);
     static std::unique_ptr<ki::Dcs> dcs;
     SDL_AudioDeviceID audio = 0;
-    if (!sound_roms.empty()) {
-        dcs = std::make_unique<ki::Dcs>(ki::read_sound_roms_or_die(sound_roms));
+    if (!sound.empty()) {
+        dcs = std::make_unique<ki::Dcs>(sound);
         board.dcs = dcs.get();
         if (!mute) {
             // KI's DCS program drives the DAC at 31250 Hz; SDL converts to the device rate.
@@ -112,16 +253,25 @@ int main(int argc, char** argv) {
     }
 
     bool turbo = false;
+    uint64_t saved_writes = 0;
+    auto save = [&]() {
+        if (!saves.empty() && board.disk_writes() != saved_writes) {
+            save_sectors(saves, board, earlier_saves);
+            saved_writes = board.disk_writes();
+        }
+    };
     auto next_frame = std::chrono::steady_clock::now();
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT || (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) {
+                save();
                 SDL_Quit();
                 std::exit(0);
             }
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_TAB && !ev.key.repeat) turbo = !turbo;
         }
+        if (frame % 600 == 0) save();  // every ~10 s, if the game wrote anything
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         uint32_t p1 = 0xffffffff, p2 = 0xffffffff;
         for (const KeyBit& k : kKeys)
@@ -156,6 +306,12 @@ int main(int argc, char** argv) {
     };
     ki::schedule(c);
     bool ok = ki::run_entry(c, entry);
+    save();
+    if (!ok)
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, kTitle,
+                                 "The recompiled program stopped on an unexpected guest fault "
+                                 "(details on the terminal).",
+                                 window);
     SDL_Quit();
     return ok ? 0 : 1;
 }

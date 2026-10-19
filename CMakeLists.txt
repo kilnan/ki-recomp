@@ -39,7 +39,9 @@ target_link_libraries(ki_runtime PUBLIC adsp2105)
 # runtime; Apple's linker does not mind.
 function(ki_code_library target)
   target_link_libraries(${target} PUBLIC ki_runtime)
-  target_link_libraries(${target} INTERFACE "$<TARGET_FILE:${target}>")
+  if(NOT APPLE)
+    target_link_libraries(${target} INTERFACE "$<TARGET_FILE:${target}>")
+  endif()
 endfunction()
 
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
@@ -182,6 +184,30 @@ if(KI_BUILD_FULL)
     target_link_libraries(ki_run_trace PRIVATE ki_boot_rom_code ki_trace_code)
   endif()
 
+  # Reading the player's MAME set directly: kinst.chd through libchdr
+  # (BSD-3-Clause), kinst.zip through the miniz it bundles (MIT). Fetched at a
+  # fixed revision; not part of this repository.
+  option(KI_WITH_CHD "read kinst.chd and kinst.zip directly (fetches libchdr)" ON)
+  if(KI_WITH_CHD)
+    include(FetchContent)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CHDR_WANT_TESTS OFF CACHE BOOL "" FORCE)
+    set(MINIZ_ARCHIVE_APIS ON CACHE BOOL "" FORCE)
+    set(MINIZ_STDIO ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(libchdr
+      GIT_REPOSITORY https://github.com/rtissera/libchdr.git
+      GIT_TAG 607694ca0812edfc9cc2030c64634fc2393668de)  # 2026-09-27
+    FetchContent_MakeAvailable(libchdr)
+    if(NOT MSVC)
+      target_compile_options(chdr-static PRIVATE -w)
+      target_compile_options(miniz PRIVATE -w)
+    endif()
+    add_library(ki_files STATIC src/ki_files.cpp)
+    target_link_libraries(ki_files PUBLIC chdr-static miniz)
+    target_include_directories(ki_files PRIVATE "${libchdr_SOURCE_DIR}/include"
+                               "${libchdr_SOURCE_DIR}/deps/miniz-3.1.2")
+  endif()
+
   add_library(ki_boot STATIC src/ki_boot.cpp)
   target_link_libraries(ki_boot PUBLIC ki_boot_rom_code ki_runtime)
   add_executable(ki_run src/ki_run.cpp)
@@ -198,6 +224,10 @@ if(KI_BUILD_FULL)
   if(SDL2_FOUND)
     add_executable(ki_play src/ki_play.cpp)
     target_link_libraries(ki_play PRIVATE ki_boot ki_full_code SDL2::SDL2)
+    if(KI_WITH_CHD)
+      target_link_libraries(ki_play PRIVATE ki_files)
+      target_compile_definitions(ki_play PRIVATE KI_HAVE_FILES)
+    endif()
   else()
     message(STATUS "SDL2 not found: ki_play is not built")
   endif()

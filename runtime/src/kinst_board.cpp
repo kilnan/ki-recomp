@@ -1,5 +1,6 @@
 #include "ki/kinst_board.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -281,6 +282,8 @@ void KinstBoard::ide_finish_write_sector() {
         disk_[off + 2 * i] = static_cast<uint8_t>(buffer_[i]);
         disk_[off + 2 * i + 1] = static_cast<uint8_t>(buffer_[i] >> 8);
     }
+    auto at = std::lower_bound(written_.begin(), written_.end(), lba_);
+    if (at == written_.end() || *at != lba_) written_.insert(at, lba_);
     ++stats.sectors_written;
     ++lba_;
     if (sectors_left_ > 1) track_head_position();
