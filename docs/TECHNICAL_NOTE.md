@@ -591,6 +591,46 @@ access: our work between two flips takes at least 3.3 ms more than MAME's.
 - **Negative control:** rerun after these changes, same result as §7 (10/10
   caught, one known gap, two equivalent mutants).
 
+## 7f. Starting from the player's ROM; release builds (19/10)
+
+**Boot ROM.** The U98 starts with 3.6 KB of code: the reset vector at
+0xbfc00000, CPU/TLB/cache init, and the decompressor. Huffman tables start at
+0x0e48 and the stream at 0x0fd0.
+- The translator handles it in a separate pass: `--code-size 0xe48` (the rest
+  of the EPROM is only data), `--alias 9fc00000` and its own function table
+  (`kBootFunctionTable`). The result is 20 functions, 1,072 instructions.
+- Two details:
+  - The code switches from the uncached to the cached view of the EPROM
+    (`and $ra,$ra,0xdfffffff` at 0xbfc00474). The runtime maps 0x9fc... to
+    0xbfc... when looking up functions, and the return-site switches accept both.
+  - The last `jr $ra` jumps to the game entry, which the code put in `$ra`. A
+    `jr $ra` in a function with local return sites now returns only when `$ra`
+    is the caller's; otherwise it jumps.
+- **Result [O]:** started from power-on state (`--boot rom`), the recompiled
+  boot ROM unpacks the game. At 0x88000000, DRAM (8 MiB), SRAM and all registers
+  equal MAME's boot snapshot. The only differences are Count and Cause, i.e. time.
+- **Boot time.** EPROM reads cost 128 cycles (`rom_r` adjusts the icount), and
+  `ldl`/`ldr` read only the 32-bit halves they need, as MAME's bus does with a
+  partial mask. The boot then takes 646.2 M cycles against MAME's 645.4 M
+  (0.13% more). The remainder probably comes from MAME's DRC reading opcodes
+  through `rom_r` when it compiles blocks; this is **[H]**.
+
+**Player files.** `src/ki_files.cpp` looks for the MAME set in a folder:
+`kinst.zip` or its nine files, and `kinst.chd`.
+- It reads the CHD with libchdr and the zip with the miniz bundled with libchdr,
+  fetched at commit 607694ca, 2026-09-27.
+- It checks every file against MAME's SHA1, including the CHD's data SHA1.
+  libchdr's output equals `chdman extracthd` byte for byte.
+- `ki_play` without `--boot` uses this mode. Sectors the game writes are kept
+  in the preferences folder and applied again at start.
+
+**Packaging.** `tools/package_macos.sh` builds the app bundle:
+- SDL3 3.4.18 and sdl2-compat 2.32.74 built for macOS 11, bundled. sdl2-compat
+  dlopens `@loader_path/libSDL3.dylib`.
+- The build tree's rpaths are removed, and the script checks that with
+  `deps-macos/` moved away the app loads only its own libraries.
+- Ad-hoc signature, and `LICENSES.txt` with the licenses of everything compiled in.
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:

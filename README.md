@@ -15,6 +15,28 @@ registers and all of RAM) on 52 captured calls, 35 of them made by the game
 itself. The translator handles 562 of the 567 functions
 reached by `jal`.
 
+## Play a release build (macOS, Apple Silicon)
+
+1. Download `KIRecompiled-macOS-arm64.zip` from the
+   [releases](https://github.com/kilnan/ki-recomp/releases) and unzip it.
+2. On first launch macOS blocks the unsigned app: open **System Settings →
+   Privacy & Security → Open Anyway**, or run
+   `xattr -dr com.apple.quarantine /path/to/KIRecompiled.app`.
+3. When asked, drag onto the window the folder with your MAME `kinst` set:
+   `kinst.zip` (BIOS v1.5d) and `kinst.chd`. The app checks every file
+   against MAME's SHA1 and remembers the folder.
+
+No game data is included: the app contains the recompiled program code and
+starts it from your ROM like the arcade board, from the reset vector. Settings
+and high scores the game writes to its disk are kept in
+`~/Library/Application Support/kilnan/KIRecompiled/`. Keyboard and gamepad
+controls are listed under [Play it](#play-it-sdl2-window).
+
+Unofficial fan project, not affiliated with or endorsed by Rare, Midway,
+Nintendo or Microsoft.
+
+## Development
+
 - Findings, sources, open questions and next step: [docs/TECHNICAL_NOTE.md](docs/TECHNICAL_NOTE.md)
 - Proof results per case: [poc/SUMMARY.md](poc/SUMMARY.md). The full report with the original
   instructions and the generated code is produced locally in `poc/out/REPORT.md` (ignored by Git).
@@ -146,17 +168,27 @@ build/ki_run --boot traces/bootstate --disk data/kinst.img --rom data/roms/kinst
     --frames 600 --dump-every 60 --out traces/run     # framebuffers as PPM
 ```
 
-`KI_TRACE_IDE=1` logs disk commands.
+`--boot rom` instead starts at the reset vector: the recompiled boot ROM
+unpacks the game itself (no snapshot needed). Its state at the game's entry
+equals the MAME snapshot byte for byte. `KI_TRACE_IDE=1` logs disk commands,
+`KI_TRACE_VRAM=1` framebuffer flips.
 
 ### Play it (SDL2 window)
 
 ```sh
-build/ki_play --boot traces/bootstate --disk data/kinst.img --rom data/roms/kinst/ki-l15d.u98 --scale 3
+build/ki_play --data data/roms/kinst     # folder with kinst.zip or its files, and kinst.chd
 ```
 
-Sound uses the eight `u10-l1` ... `u36-l1` ROMs from the directory of `--rom`
-(or `--sound-roms DIR`); without them, or with `--mute`, the game runs silent.
-`ki_run --sound-roms DIR --wav-out FILE` records the audio of a headless run.
+This is the release mode: start at the reset vector from the MAME set, with
+sound. Without `--data`, the last folder is used, or the window asks for one
+to be dropped onto it. For development, the old form still works:
+`ki_play --boot traces/bootstate|rom --disk data/kinst.img --rom data/roms/kinst/ki-l15d.u98
+[--sound-roms DIR] [--mute]`. `ki_run --sound-roms DIR --wav-out FILE` records the
+audio of a headless run.
+
+`tools/package_macos.sh VERSION` builds the portable app bundle in `dist/`
+(SDL3 and sdl2-compat built from source for macOS 11, bundled; ad-hoc signed)
+and checks that it loads only its own libraries.
 
 **Player 1**
 
@@ -177,6 +209,16 @@ Sound uses the eight `u10-l1` ... `u36-l1` ROMs from the directory of `--rom`
 | T / Y / U | low attacks |
 | 2 | start |
 | 6 | coin |
+
+**Gamepads** (Xbox layout; first pad = player 1, second = player 2)
+
+| button | action |
+|---|---|
+| d-pad / left stick | move |
+| X / Y / RB | high attack: quick, medium, fierce |
+| A / B / RT | low attack: quick, medium, fierce |
+| Start | start |
+| Back | coin |
 
 **Other keys**
 
@@ -209,7 +251,8 @@ It covers only the code written for this project. Killer Instinct and every
 file derived from it belong to their rights holders and are neither included
 nor licensed here. That covers ROMs, the disk image, extracted images, MAME
 captures, the generated C++ (`build/gen/`) and the full report (`poc/out/`).
-You need your own copy of the game.
+You need your own copy of the game. Release builds contain the compiled
+recompiled code, as other static recompilation projects do, but no game data.
 
 Third-party projects:
 
@@ -222,7 +265,11 @@ Third-party projects:
 - **N64Recomp** (MIT) is used as documentation.
 - **rabbitizer** (MIT) is installed with pip.
 - **ki-rom** (AGPL-3.0-only): its kipack tool is built and run as a separate
-  program by `tools/extract_game_code.sh`.
+  program by `tools/extract_game_code.sh` at build time. Release builds do not
+  use it: the recompiled boot ROM unpacks the game.
+- **libchdr** (BSD-3-Clause) and the **miniz** it bundles (MIT) are fetched by
+  CMake at a fixed revision to read `kinst.chd` and `kinst.zip`.
+- **SDL3** and **sdl2-compat** (zlib) are bundled with the macOS app.
 
 Apart from `third_party/adsp2100/`, no source code from these projects is
 included. Code reused from them must keep its original copyright notice. Code

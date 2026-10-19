@@ -10,3 +10,5 @@ __pycache__/
 .venv/
 # Reports containing original game code or its translation stay local
 /poc/out/
+deps-macos/
+dist/

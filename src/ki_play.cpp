@@ -20,6 +20,7 @@
 // Z X C = low quick/medium/fierce, 1 = start, 5 = coin.
 // Player 2: I J K L move, Q W E / T Y U attacks... see kKeys. F2 = service
 // (test switch), Esc quits, Tab toggles unthrottled speed (no sound while on).
+// Gamepads work too, see kPadButtons.
 #include <SDL.h>
 
 #include <algorithm>
@@ -61,6 +62,38 @@ const KeyBit kKeys[] = {
     {SDL_SCANCODE_I, 2, 0x040},     {SDL_SCANCODE_K, 2, 0x080},     {SDL_SCANCODE_J, 2, 0x100},
     {SDL_SCANCODE_L, 2, 0x200},     {SDL_SCANCODE_2, 2, 0x400},     {SDL_SCANCODE_6, 2, 0x800},
 };
+
+// Gamepads (SDL GameController, Xbox layout): the first pad is player 1, the
+// second player 2. Top row X Y RB = high quick/medium/fierce, bottom row
+// A B RT = low quick/medium/fierce; d-pad or left stick moves; Start = start,
+// Back = coin.
+struct PadBit {
+    SDL_GameControllerButton button;
+    uint32_t bit;
+};
+const PadBit kPadButtons[] = {
+    {SDL_CONTROLLER_BUTTON_X, 0x001},          {SDL_CONTROLLER_BUTTON_Y, 0x002},
+    {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0x004}, {SDL_CONTROLLER_BUTTON_A, 0x008},
+    {SDL_CONTROLLER_BUTTON_B, 0x010},          {SDL_CONTROLLER_BUTTON_DPAD_UP, 0x040},
+    {SDL_CONTROLLER_BUTTON_DPAD_DOWN, 0x080},  {SDL_CONTROLLER_BUTTON_DPAD_LEFT, 0x100},
+    {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 0x200}, {SDL_CONTROLLER_BUTTON_START, 0x400},
+    {SDL_CONTROLLER_BUTTON_BACK, 0x800},
+};
+
+uint32_t pad_bits(SDL_GameController* pad) {
+    uint32_t bits = 0;
+    for (const PadBit& b : kPadButtons)
+        if (SDL_GameControllerGetButton(pad, b.button)) bits |= b.bit;
+    if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000) bits |= 0x020;
+    const int dead = 16000;
+    int x = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
+    int y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+    if (y < -dead) bits |= 0x040;
+    if (y > dead) bits |= 0x080;
+    if (x < -dead) bits |= 0x100;
+    if (x > dead) bits |= 0x200;
+    return bits;
+}
 
 constexpr double kFrameSeconds = 1.0 / (6.25e6 / (406.0 * 261.0));
 constexpr const char* kTitle = "Killer Instinct (recompiled)";
@@ -139,7 +172,7 @@ int main(int argc, char** argv) {
         else if (k == "--sound-roms") sound_roms = v;
         else if (k == "--data") data = v;
     }
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
@@ -253,6 +286,7 @@ int main(int argc, char** argv) {
     }
 
     bool turbo = false;
+    std::vector<SDL_GameController*> pads;  // opened as SDL reports them (SDL_CONTROLLERDEVICEADDED)
     uint64_t saved_writes = 0;
     auto save = [&]() {
         if (!saves.empty() && board.disk_writes() != saved_writes) {
@@ -270,12 +304,26 @@ int main(int argc, char** argv) {
                 std::exit(0);
             }
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_TAB && !ev.key.repeat) turbo = !turbo;
+            if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                if (SDL_GameController* pad = SDL_GameControllerOpen(ev.cdevice.which)) pads.push_back(pad);
+            }
+            if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                for (SDL_GameController*& pad : pads)
+                    if (pad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad)) == ev.cdevice.which) {
+                        SDL_GameControllerClose(pad);
+                        pad = nullptr;
+                    }
+                pads.erase(std::remove(pads.begin(), pads.end(), nullptr), pads.end());
+            }
         }
         if (frame % 600 == 0) save();  // every ~10 s, if the game wrote anything
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         uint32_t p1 = 0xffffffff, p2 = 0xffffffff;
         for (const KeyBit& k : kKeys)
             if (keys[k.key]) (k.player == 1 ? p1 : p2) &= ~k.bit;
+        int player = 0;
+        for (SDL_GameController* pad : pads)
+            if (pad && SDL_GameControllerGetAttached(pad) && player < 2) (player++ == 0 ? p1 : p2) &= ~pad_bits(pad);
         board.p1 = p1;
         board.p2 = p2;
 
