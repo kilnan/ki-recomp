@@ -45,6 +45,9 @@ int main(int argc, char** argv) {
     static std::string dump_dir;
     uint64_t frames = 600, dump_every = 60;
     static uint64_t dram_from = ~0ull, dram_to = 0;
+    static uint64_t save_at = 0, load_at = 0;
+    static bool loaded_once = false;
+    static ki::SaveState state;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i], v = argv[i + 1];
         if (k == "--boot") boot = v;
@@ -64,6 +67,8 @@ int main(int argc, char** argv) {
         else if (k == "--trace-max") trace_max = std::stoull(v);
         else if (k == "--sound-roms") sound_roms = v;
         else if (k == "--wav-out") wav_out = v;
+        else if (k == "--save-at") save_at = std::stoull(v);  // save-state test: save at frame N ...
+        else if (k == "--load-at") load_at = std::stoull(v);  // ... and load it back at frame M (once)
         else if (k == "--dram-frames") {  // A-B: write DRAM at each VBLANK of frames A..B (dram_<frame>.bin)
             size_t dash = v.find('-');
             dram_from = std::stoull(v.substr(0, dash));
@@ -115,6 +120,14 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
         if (frame == call_log_from) ctx.call_log = &call_log;
+        if (save_at && frame == save_at && !loaded_once) state.request(ctx);
+        if (load_at && frame == load_at && !loaded_once && state.valid()) {
+            // Save-state test: the frame at load_at is written before and after the load.
+            write_ppm(out + "/before_load.ppm", board.framebuffer_rgb(ctx));
+            loaded_once = true;
+            throw ki::LoadStateRequest{};
+        }
+        if (load_at && loaded_once && frame == load_at) write_ppm(out + "/after_load.ppm", board.framebuffer_rgb(ctx));
         if (frame >= dram_from && frame <= dram_to) {
             char name[64];
             std::snprintf(name, sizeof name, "/dram_%05llu.bin", static_cast<unsigned long long>(frame));
@@ -188,7 +201,7 @@ int main(int argc, char** argv) {
         // --dump-at ADDR: save SRAM/DRAM and registers at the first entry of a function, then exit.
         dump_dir = out;
         c.watch_entry = dump_at;
-        c.on_watch = [](ki::Context& ctx) {
+        c.on_watch = [](ki::Context& ctx, uint32_t) {
             static unsigned long hits = 0;
             if (++hits < dump_hit) return;
             auto save = [](const std::string& path, const std::vector<uint8_t>& data) {
@@ -249,8 +262,22 @@ int main(int argc, char** argv) {
             }
         };
     }
+    if (dcs) state.bind(board, dcs.get(), ki::read_sound_roms_or_die(sound_roms));
+    else state.bind(board, nullptr, {});
     ki::schedule(c);
-    if (!ki::run_entry(c, entry)) {
+    bool ran = false;
+    for (;;) {
+        try {
+            ran = ki::run_entry(c, entry);
+            break;
+        } catch (const ki::LoadStateRequest&) {
+            entry = state.restore(c);
+            // replay the input script from the restored frame
+            next_event = 0;
+            std::printf("state loaded at frame %llu\n", static_cast<unsigned long long>(load_at));
+        }
+    }
+    if (!ran) {
         std::printf("  dram 0x88100000:");
         for (int i = 0; i < 16; ++i) std::printf(" %02x", c.dram[0x100000 + i]);
         std::printf("\n");

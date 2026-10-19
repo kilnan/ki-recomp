@@ -646,6 +646,23 @@ also returns through a `$ra` reloaded from the stack after a tail jump, which
 differs from the `$ra` passed in, so jumping there faulted about 20 s into a
 game. The jump rule is now limited to the boot ROM (`--jr-ra-jumps`).
 
+**Save states [O].** F5/F9 in `ki_play`.
+- **Saving.** Recompiled code cannot be resumed at an arbitrary point, so a
+  state is taken at the entry of a per-frame function whose return site in a
+  main loop is an entry point. These are the same points mid-game MAME
+  snapshots start from: the dispatcher 0x88002038 during games and 0x88003e08
+  in the attract demo. The intro screens have no such point.
+- **What is copied:** the CPU context, the board (including the disk), and the
+  DCS and DSP state.
+- **Loading.** An exception unwinds the host stack; then `run_entry` restarts
+  the function and continues at its return site.
+- **Test.** `ki_run --save-at N --load-at M` saves at frame N, loads at frame M
+  and replays the inputs. In character select, fights and attract demo
+  (N = 1300, 2000, 5000, 9000), the final frame equals the one of a run without
+  save/load.
+- **Also found:** the game issues IDE SET MAX (0xf9). MAME just raises the
+  interrupt; we used to answer with an error. Fixed.
+
 **Player files.** `src/ki_files.cpp` looks for the MAME set in a folder:
 `kinst.zip` or its nine files, and `kinst.chd`.
 - It reads the CHD with libchdr and the zip with the miniz bundled with libchdr,

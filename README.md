@@ -225,6 +225,8 @@ and checks that it loads only its own libraries.
 
 | key | action |
 |---|---|
+| F5 | save the state (taken at the next frame) |
+| F9 | load the saved state |
 | F2 | test switch |
 | Tab | unthrottled (no sound while on) |
 | Esc | quit |

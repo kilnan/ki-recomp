@@ -20,7 +20,7 @@
 // Z X C = low quick/medium/fierce, 1 = start, 5 = coin.
 // Player 2: I J K L move, Q W E / T Y U attacks... see kKeys. F2 = service
 // (test switch), Esc quits, Tab toggles unthrottled speed (no sound while on).
-// Gamepads work too, see kPadButtons.
+// Gamepads work too, see kPadButtons. F5 saves the state, F9 loads it.
 #include <SDL.h>
 
 #include <algorithm>
@@ -285,9 +285,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    static ki::SaveState state;  // F5 / F9
+    state.bind(board, dcs.get(), sound);
+
     bool turbo = false;
     std::vector<SDL_GameController*> pads;  // opened as SDL reports them (SDL_CONTROLLERDEVICEADDED)
     uint64_t saved_writes = 0;
+    uint64_t title_reset_frame = 0;
     auto save = [&]() {
         if (!saves.empty() && board.disk_writes() != saved_writes) {
             save_sectors(saves, board, earlier_saves);
@@ -304,6 +308,10 @@ int main(int argc, char** argv) {
                 std::exit(0);
             }
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_TAB && !ev.key.repeat) turbo = !turbo;
+            if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F5)
+                state.request(ctx);  // taken at the next dispatcher entry
+            if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F9 && state.valid())
+                throw ki::LoadStateRequest{};
             if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                 if (SDL_GameController* pad = SDL_GameControllerOpen(ev.cdevice.which)) pads.push_back(pad);
             }
@@ -317,6 +325,14 @@ int main(int argc, char** argv) {
             }
         }
         if (frame % 600 == 0) save();  // every ~10 s, if the game wrote anything
+        if (state.just_saved()) {
+            SDL_SetWindowTitle(window, "Killer Instinct (recompiled): state saved (F9 loads it)");
+            title_reset_frame = frame + 120;
+        }
+        if (title_reset_frame && frame >= title_reset_frame) {
+            SDL_SetWindowTitle(window, kTitle);
+            title_reset_frame = 0;
+        }
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         uint32_t p1 = 0xffffffff, p2 = 0xffffffff;
         for (const KeyBit& k : kKeys)
@@ -353,7 +369,18 @@ int main(int argc, char** argv) {
         }
     };
     ki::schedule(c);
-    bool ok = ki::run_entry(c, entry);
+    bool ok = false;
+    for (;;) {
+        try {
+            ok = ki::run_entry(c, entry);
+            break;
+        } catch (const ki::LoadStateRequest&) {
+            entry = state.restore(c);
+            if (audio) SDL_ClearQueuedAudio(audio);
+            next_frame = std::chrono::steady_clock::now();
+            SDL_SetWindowTitle(window, "Killer Instinct (recompiled): state loaded");
+        }
+    }
     save();
     if (!ok)
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, kTitle,

@@ -112,4 +112,54 @@ bool run_entry(Context& c, uint32_t entry) {
     }
 }
 
+namespace {
+SaveState* g_save_state = nullptr;  // the one armed on_watch hook refers to
+}
+
+void SaveState::bind(KinstBoard& board, Dcs* dcs, const std::vector<std::vector<uint8_t>>& sound_roms) {
+    live_board_ = &board;
+    live_dcs_ = dcs;
+    if (dcs) dcs_ = std::make_unique<Dcs>(sound_roms);
+}
+
+void SaveState::request(Context& c) {
+    requested_ = true;
+    g_save_state = this;
+    c.watch_entry = kDispatcher;
+    c.watch_entry2 = kFrame;
+    c.on_watch = on_entry;
+}
+
+void SaveState::on_entry(Context& c, uint32_t entry) {
+    SaveState& s = *g_save_state;
+    if (!s.requested_ || !lookup_function(lo32(c.r[31]))) return;  // needs a known return site
+    s.ctx_ = c;
+    s.entry_ = entry;
+    s.board_.emplace(*s.live_board_);
+    if (s.live_dcs_) s.dcs_->copy_state_from(*s.live_dcs_);
+    s.valid_ = true;
+    s.requested_ = false;
+    s.just_saved_ = true;
+    c.watch_entry = c.watch_entry2 = 0;
+}
+
+uint32_t SaveState::restore(Context& c) {
+    // The board's hooks and pointers are the running program's own.
+    IoHandler* io = c.io;
+    auto* call_log = c.call_log;
+    auto trace_fn = c.trace_fn;
+    c = ctx_;
+    c.io = io;
+    c.call_log = call_log;
+    c.trace_fn = trace_fn;
+    c.watch_entry = c.watch_entry2 = 0;
+    c.on_watch = nullptr;
+    c.tail_fn = nullptr;
+    c.depth = 0;
+    *live_board_ = *board_;
+    if (live_dcs_) live_dcs_->copy_state_from(*dcs_);
+    schedule(c);
+    return entry_;
+}
+
 }  // namespace ki

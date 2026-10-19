@@ -78,8 +78,8 @@ struct Context {
     // Optional per-instruction hook, called by code generated with --trace.
     void (*trace_fn)(Context&, uint32_t pc) = nullptr;
     // Optional hook when a given function is entered (diagnostics).
-    uint32_t watch_entry = 0;
-    void (*on_watch)(Context&) = nullptr;
+    uint32_t watch_entry = 0, watch_entry2 = 0;  // on_watch runs at the entry of either
+    void (*on_watch)(Context&, uint32_t entry) = nullptr;
     uint32_t recent_service_pc[64] = {};  // safe points where service() ran
     uint32_t recent_service_pos = 0;
     std::vector<uint8_t> sram = std::vector<uint8_t>(kSramSize);
@@ -298,7 +298,7 @@ struct FrameGuard {
         c.recent[c.recent_pos++ & 63] = vaddr;
         if (c.call_log) c.call_log->push_back(vaddr);
         if (c.trace_fn) c.trace_fn(c, vaddr | 1);  // odd = function entry marker
-        if (vaddr == c.watch_entry && c.on_watch) c.on_watch(c);
+        if ((vaddr == c.watch_entry || vaddr == c.watch_entry2) && c.on_watch) c.on_watch(c, vaddr);
         if (++c.depth > kMaxDepth) raise_fault(c, Fault::Unimplemented, vaddr, 0xdeeedeee);
     }
     ~FrameGuard() { --c.depth; }

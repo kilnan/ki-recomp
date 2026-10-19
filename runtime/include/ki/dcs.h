@@ -41,6 +41,10 @@ public:
     std::vector<int16_t>& samples() { return samples_; }
     double sample_rate() const { return sample_rate_; }
 
+    // Save states: copies another board's complete state (DSP included) into
+    // this one. Both must have been built from the same sound ROMs.
+    void copy_state_from(const Dcs& o);
+
     // adsp::Bus
     uint16_t data_read(uint32_t addr) override;
     void data_write(uint32_t addr, uint16_t data) override;

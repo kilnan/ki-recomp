@@ -343,6 +343,11 @@ void KinstBoard::ide_command(uint8_t cmd) {
             xfer_ = Xfer::None;  // recalibrate, set features, power, seek
             start_busy(kUsec * 10, Pending::Command);
             return;
+        case 0xf9:  // SET MAX ADDRESS: accepted, only an interrupt (MAME atastorage.cpp)
+            xfer_ = Xfer::None;
+            status_ = kDrdy | kDsc;
+            irq_ = true;
+            return;
         default:
             std::fprintf(stderr, "[ide] unsupported command %02x\n", cmd);
             err_ = 0x04;  // ABRT

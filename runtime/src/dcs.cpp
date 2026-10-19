@@ -18,6 +18,39 @@ Dcs::Dcs(const std::vector<std::vector<uint8_t>>& roms)
     dsp_.reset();
 }
 
+void Dcs::copy_state_from(const Dcs& o) {
+    internal_pram_ = o.internal_pram_;
+    external_pram_ = o.external_pram_;
+    internal_dram_ = o.internal_dram_;
+    control_regs_ = o.control_regs_;
+    bank_ = o.bank_;
+    latch_control_ = o.latch_control_;
+    input_data_ = o.input_data_;
+    output_data_ = o.output_data_;
+    progflags_ = o.progflags_;
+    dac_on_ = o.dac_on_;
+    ireg_ = o.ireg_;
+    size_ = o.size_;
+    ireg_base_ = o.ireg_base_;
+    incs_ = o.incs_;
+    sample_rate_ = o.sample_rate_;
+    half_period_ = o.half_period_;
+    next_transfer_ = o.next_transfer_;
+    dac_off_since_ = o.dac_off_since_;
+    irq1_pending_clear_ = o.irq1_pending_clear_;
+    timer_enable_ = o.timer_enable_;
+    timer_ignore_ = o.timer_ignore_;
+    timer_armed_ = o.timer_armed_;
+    timer_scale_ = o.timer_scale_;
+    timer_period_ = o.timer_period_;
+    timer_start_count_ = o.timer_start_count_;
+    timer_start_cycles_ = o.timer_start_cycles_;
+    timers_fired_ = o.timers_fired_;
+    next_timer_ = o.next_timer_;
+    samples_.clear();
+    dsp_.copy_state_from(o.dsp_);
+}
+
 // ---- host interface ----------------------------------------------------------
 
 void Dcs::reset_w(bool state) {

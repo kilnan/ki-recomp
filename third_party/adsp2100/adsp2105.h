@@ -70,6 +70,11 @@ public:
     uint32_t get_ibase(int n) const { return m_base[n]; }
     uint32_t pc() const { return m_pc; }
     // Cycles run so far, also correct from a Bus callback in the middle of run().
+    // Copies the CPU state (registers, stacks, interrupt state, cycle count) of
+    // another core, for save states. The register pointer tables stay this
+    // object's own. (Added for ki-recomp.)
+    void copy_state_from(const Adsp2105& o);
+
     uint64_t total_cycles() const { return m_running ? m_total_cycles + (m_slice - m_icount) : m_total_cycles; }
 
 private:

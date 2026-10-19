@@ -322,6 +322,51 @@ void Adsp2105::create_tables()
 	}
 }
 
+void Adsp2105::copy_state_from(const Adsp2105& o)
+{
+	m_in_reset = o.m_in_reset;
+	m_total_cycles = o.m_total_cycles;
+	m_pc = o.m_pc;
+	m_ppc = o.m_ppc;
+	m_loop = o.m_loop;
+	m_loop_condition = o.m_loop_condition;
+	m_cntr = o.m_cntr;
+	m_astat = o.m_astat;
+	m_sstat = o.m_sstat;
+	m_mstat = o.m_mstat;
+	m_mstat_prev = o.m_mstat_prev;
+	m_astat_clear = o.m_astat_clear;
+	m_idle = o.m_idle;
+	m_core = o.m_core;
+	std::memcpy(m_i, o.m_i, sizeof m_i);
+	std::memcpy(m_m, o.m_m, sizeof m_m);
+	std::memcpy(m_l, o.m_l, sizeof m_l);
+	std::memcpy(m_lmask, o.m_lmask, sizeof m_lmask);
+	std::memcpy(m_base, o.m_base, sizeof m_base);
+	m_px = o.m_px;
+	m_pmovlay = o.m_pmovlay;
+	m_dmovlay = o.m_dmovlay;
+	std::memcpy(m_loop_stack, o.m_loop_stack, sizeof m_loop_stack);
+	std::memcpy(m_cntr_stack, o.m_cntr_stack, sizeof m_cntr_stack);
+	std::memcpy(m_pc_stack, o.m_pc_stack, sizeof m_pc_stack);
+	std::memcpy(m_stat_stack, o.m_stat_stack, sizeof m_stat_stack);
+	m_pc_sp = o.m_pc_sp;
+	m_cntr_sp = o.m_cntr_sp;
+	m_stat_sp = o.m_stat_sp;
+	m_loop_sp = o.m_loop_sp;
+	m_flagout = o.m_flagout;
+	m_flagin = o.m_flagin;
+	m_fl0 = o.m_fl0;
+	m_fl1 = o.m_fl1;
+	m_fl2 = o.m_fl2;
+	m_imask = o.m_imask;
+	m_icntl = o.m_icntl;
+	m_ifc = o.m_ifc;
+	std::memcpy(m_irq_state, o.m_irq_state, sizeof m_irq_state);
+	std::memcpy(m_irq_latch, o.m_irq_latch, sizeof m_irq_latch);
+	m_alt = o.m_alt;
+}
+
 void Adsp2105::set_ireg(int n, uint32_t v)
 {
 	m_i[n] = v & 0x3fff;
