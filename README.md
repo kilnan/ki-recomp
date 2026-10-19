@@ -24,8 +24,9 @@ reached by `jal`.
    Privacy & Security → Open Anyway**, or run
    `xattr -dr com.apple.quarantine /path/to/KIRecompiled.app`.
 3. When asked, drag onto the window the folder with your MAME `kinst` set:
-   `kinst.zip` (BIOS v1.5d) and `kinst.chd`. The app checks every file
-   against MAME's SHA1 and remembers the folder.
+   `kinst.zip` (BIOS v1.5d) and `kinst.chd`, or a `.zip` that contains
+   `kinst.chd` (extracted once into the preferences folder). The app checks
+   every file against MAME's SHA1 and remembers the folder.
 
 No game data is included: the app contains the recompiled program code and
 starts it from your ROM like the arcade board, from the reset vector. Settings

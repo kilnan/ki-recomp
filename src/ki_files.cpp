@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 
@@ -89,9 +90,42 @@ bool read_chd(const std::string& path, std::vector<uint8_t>& out, std::string& e
     return true;
 }
 
+// A kinst.chd inside some .zip of the folder, extracted to cache_dir.
+std::string chd_from_zip(const std::vector<std::string>& dirs, const std::string& cache_dir) {
+    if (cache_dir.empty()) return "";
+    std::error_code ec;
+    for (const std::string& d : dirs) {
+        for (const auto& entry : std::filesystem::directory_iterator(d, ec)) {
+            if (entry.path().extension() != ".zip" || entry.path().filename() == "kinst.zip") continue;
+            mz_zip_archive ar;
+            std::memset(&ar, 0, sizeof ar);
+            if (!mz_zip_reader_init_file(&ar, entry.path().string().c_str(), 0)) continue;
+            int index = mz_zip_reader_locate_file(&ar, "kinst.chd", nullptr, 0);  // also finds kinst/kinst.chd
+            std::string target = cache_dir + "/kinst.chd";
+            bool ok = false;
+            if (index >= 0) {
+                mz_zip_archive_file_stat st;
+                if (mz_zip_reader_file_stat(&ar, static_cast<mz_uint>(index), &st)) {
+                    // Reuse an earlier extraction of the same size.
+                    ok = std::filesystem::file_size(target, ec) == st.m_uncomp_size && !ec;
+                    ec.clear();
+                    if (!ok) {
+                        std::string tmp = target + ".part";
+                        ok = mz_zip_reader_extract_to_file(&ar, static_cast<mz_uint>(index), tmp.c_str(), 0);
+                        if (ok) std::filesystem::rename(tmp, target, ec), ok = !ec;
+                    }
+                }
+            }
+            mz_zip_reader_end(&ar);
+            if (ok) return target;
+        }
+    }
+    return "";
+}
+
 }  // namespace
 
-bool load_game_files(const std::string& dir, GameFiles& out, std::string& error) {
+bool load_game_files(const std::string& dir, GameFiles& out, std::string& error, const std::string& cache_dir) {
     const std::vector<std::string> dirs = {dir, dir + "/kinst"};
     auto verify = [&](const Expected& e, std::vector<uint8_t>& data) {
         if (!read_rom(dirs, e.name, data)) {
@@ -118,8 +152,9 @@ bool load_game_files(const std::string& dir, GameFiles& out, std::string& error)
             chd = d + "/kinst.chd";
             break;
         }
+    if (chd.empty()) chd = chd_from_zip(dirs, cache_dir);
     if (chd.empty()) {
-        error = "kinst.chd (the hard disk image) not found in " + dir + ".";
+        error = "kinst.chd (the hard disk image) not found in " + dir + " (as a file or inside a .zip).";
         return false;
     }
     if (!read_chd(chd, out.disk, error)) return false;

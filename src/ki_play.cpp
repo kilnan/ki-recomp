@@ -210,13 +210,13 @@ int main(int argc, char** argv) {
         if (data.empty()) data = read_text(prefs + "data_dir.txt");
         ki::GameFiles files;
         std::string error;
-        bool ok = !data.empty() && ki::load_game_files(data, files, error);
+        bool ok = !data.empty() && ki::load_game_files(data, files, error, prefs);
         if (!ok) {
             std::string msg =
                 (data.empty() ? std::string("Drag the folder with your MAME 'kinst' set onto this window.")
                               : "The game files in " + data + " cannot be used:\n" + error +
                                     "\n\nDrag another folder onto this window.") +
-                "\n\nThe folder must contain kinst.zip (BIOS v1.5d) and kinst.chd.";
+                "\n\nThe folder must contain kinst.zip (BIOS v1.5d) and kinst.chd (or a .zip with it).";
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, kTitle, msg.c_str(), window);
             SDL_SetWindowTitle(window, "Killer Instinct (recompiled): drop the kinst folder here");
             SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
@@ -230,11 +230,11 @@ int main(int argc, char** argv) {
                 std::string dropped = ev.drop.file;
                 SDL_free(ev.drop.file);
                 // A dropped file (kinst.zip, kinst.chd) stands for its folder.
-                if (!ki::load_game_files(dropped, files, error)) {
+                if (!ki::load_game_files(dropped, files, error, prefs)) {
                     size_t slash = dropped.find_last_of('/');
                     std::string parent = slash == std::string::npos ? dropped : dropped.substr(0, slash);
                     std::string e2;
-                    if (ki::load_game_files(parent, files, e2)) dropped = parent;
+                    if (ki::load_game_files(parent, files, e2, prefs)) dropped = parent;
                     else {
                         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, kTitle, error.c_str(), window);
                         continue;

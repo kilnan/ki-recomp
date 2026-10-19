@@ -20,7 +20,10 @@ struct GameFiles {
 
 // Loads and verifies the game from `dir`. On failure returns false and a
 // message for the player in `error` (what is missing or wrong, and what to use).
-bool load_game_files(const std::string& dir, GameFiles& out, std::string& error);
+// When the folder has no kinst.chd but a .zip that contains one (as CHDs are
+// often downloaded), it is extracted once into `cache_dir` and used from there.
+bool load_game_files(const std::string& dir, GameFiles& out, std::string& error,
+                     const std::string& cache_dir = "");
 
 // SHA1 of a buffer, lowercase hex.
 std::string sha1_hex(const uint8_t* data, size_t size);
