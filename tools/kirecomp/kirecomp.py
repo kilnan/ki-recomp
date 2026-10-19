@@ -280,8 +280,10 @@ class Function:
 
 
 class Translator:
-    def __init__(self, img: Image, allow_unimplemented: bool, timing: bool = True, trace: bool = False):
+    def __init__(self, img: Image, allow_unimplemented: bool, timing: bool = True, trace: bool = False,
+                 jr_ra_jumps: bool = False):
         self.trace = trace
+        self.jr_ra_jumps = jr_ra_jumps
         self.img = img
         self.allow_unimplemented = allow_unimplemented
         self.timing = timing
@@ -532,7 +534,7 @@ class Translator:
         out = [f"void func_{fn.start:08x}(ki::Context& c) {{",
                f"    // guest 0x{fn.start:08x}-0x{fn.end:08x} ({len(insns)} instructions)",
                "    bool br = false;", "    (void)br;", "    (void)c;"]
-        uses_entry_ra = bool(return_sites) or any(i.name == "jr" and i.rs != 31 for i in insns)
+        uses_entry_ra = (bool(return_sites) and self.jr_ra_jumps) or any(i.name == "jr" and i.rs != 31 for i in insns)
         if uses_entry_ra:
             # Return address the caller passed in $ra: hand-written code also
             # returns through other registers (e.g. `move a1,ra ... jr a1`).
@@ -674,10 +676,17 @@ class Translator:
                         emit(f"    case {u32(t)}: goto L_{t:08x};")
                         if self.img.alias_base is not None:  # same code at its other address (KSEG0/KSEG1)
                             emit(f"    case {u32(self.img.alias(t))}: goto L_{t:08x};")
-                    # The caller passed this $ra in; any other value is a jump (the boot
-                    # ROM sets $ra to the game's entry point before its final `jr $ra`).
-                    emit("    default: if (tgt == entry_ra) return;")
-                    emit(f"             ki::tail_indirect(c, tgt, {u32(i.vaddr)}); return;")
+                    if self.jr_ra_jumps:
+                        # The caller passed this $ra in; any other value is a jump (the
+                        # boot ROM sets $ra to the game's entry point before its final
+                        # `jr $ra`).
+                        emit("    default: if (tgt == entry_ra) return;")
+                        emit(f"             ki::tail_indirect(c, tgt, {u32(i.vaddr)}); return;")
+                    else:
+                        # The external caller. Game code also returns through a $ra
+                        # reloaded from the stack after a tail jump, which differs from
+                        # the one passed in but still means "return".
+                        emit("    default: return;")
                     emit("  } }")
                 elif i.rs == 31:
                     # Assumes $ra still holds the caller's return address, as
@@ -854,6 +863,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--alias", type=lambda x: int(x, 16),
                     help="the image also executes from this address (e.g. 9fc00000, the cached view of "
                          "the boot EPROM at bfc00000): return sites accept both")
+    ap.add_argument("--jr-ra-jumps", action="store_true",
+                    help="in functions with local return sites, a `jr $ra` to anything but the "
+                         "caller's $ra jumps there (the boot ROM's hand-off to the game)")
     ap.add_argument("--table-symbol", default="kFunctionTable",
                     help="name of the emitted address -> function table (kFunctionTable for the game, "
                          "kBootFunctionTable for the boot ROM)")
@@ -879,7 +891,8 @@ def main(argv: list[str]) -> int:
     for spec in args.data:
         path, vram = spec.rsplit("@", 1)
         img.add_data(open(path, "rb").read(), int(vram, 16))
-    tr = Translator(img, args.allow_unimplemented, timing=not args.no_timing, trace=args.trace)
+    tr = Translator(img, args.allow_unimplemented, timing=not args.no_timing, trace=args.trace,
+                    jr_ra_jumps=args.jr_ra_jumps)
     specs = [parse_func_spec(s) for s in args.func]
     if args.discover:
         explicit = {a for a, _ in specs}

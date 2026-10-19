@@ -626,7 +626,7 @@ decide on which side of a frame edge the wait ends. This is **[H]**.
     0xbfc... when looking up functions, and the return-site switches accept both.
   - The last `jr $ra` jumps to the game entry, which the code put in `$ra`. A
     `jr $ra` in a function with local return sites now returns only when `$ra`
-    is the caller's; otherwise it jumps.
+    is the caller's; otherwise it jumps (boot ROM only, `--jr-ra-jumps`).
 - **Result [O]:** started from power-on state (`--boot rom`), the recompiled
   boot ROM unpacks the game. At 0x88000000, DRAM (8 MiB), SRAM and all registers
   equal MAME's boot snapshot. The only differences are Count and Cause, i.e. time.
@@ -635,6 +635,16 @@ decide on which side of a frame edge the wait ends. This is **[H]**.
   partial mask. The boot then takes 646.2 M cycles against MAME's 645.4 M
   (0.13% more). The remainder probably comes from MAME's DRC reading opcodes
   through `rom_r` when it compiles blocks; this is **[H]**.
+
+**Robustness [O].** Three 20-minute sessions from power-on with random
+two-player input (`tools/make_soak_inputs.py`, seeds 1-3) run without a guest
+fault. They cover 1,187-1,428 disk commands each, versus fights on many stages
+and character selects.
+
+This found a bug in the first version of the `jr $ra` change above. Game code
+also returns through a `$ra` reloaded from the stack after a tail jump, which
+differs from the `$ra` passed in, so jumping there faulted about 20 s into a
+game. The jump rule is now limited to the boot ROM (`--jr-ra-jumps`).
 
 **Player files.** `src/ki_files.cpp` looks for the MAME set in a folder:
 `kinst.zip` or its nine files, and `kinst.chd`.

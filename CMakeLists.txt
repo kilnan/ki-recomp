@@ -140,7 +140,7 @@ if(KI_BUILD_FULL)
     OUTPUT "${BOOT_GEN}"
     COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
             --image "${KI_BOOT_ROM_IMAGE}" --vram bfc00000 --alias 9fc00000 --code-size 0xe48
-            --expect-sha1 ${KI_BOOT_ROM_SHA1} --func bfc00000 --discover
+            --expect-sha1 ${KI_BOOT_ROM_SHA1} --func bfc00000 --discover --jr-ra-jumps
             --table-symbol kBootFunctionTable --out "${BOOT_GEN}"
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_BOOT_ROM_IMAGE}"
     COMMENT "Recompiling the boot ROM"
