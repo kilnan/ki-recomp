@@ -156,6 +156,7 @@ void HdRenderer::on_before(Context& c) {
     r.bank_ = (c.dram[0x86200] & 1) ? 0x58000 : 0x30000;  // the blitter's target (0x88010900)
     r.sync(c, r.bank_);
     r.key_ = sprite_key(c);
+    r.header_ = lo32(c.r[3]);
     r.s7_ = static_cast<int32_t>(lo32(c.r[23]));
     r.t8_ = static_cast<int32_t>(lo32(c.r[24]));
     r.t1_ = static_cast<int32_t>(lo32(c.r[9]));
@@ -167,7 +168,10 @@ void HdRenderer::on_before(Context& c) {
 void HdRenderer::on_after(Context& c) {
     HdRenderer& r = *g_hd;
     auto it = r.pack_.find(r.key_);
-    if (it == r.pack_.end() || r.mode_ == 48) return;  // drawn normally; picked up by the next sync
+    if (it == r.pack_.end() || r.mode_ == 48) {  // drawn normally; picked up by the next sync
+        ++r.misses_[static_cast<uint64_t>(r.header_) << 32 | static_cast<uint32_t>(r.mode_)];
+        return;
+    }
     Image& im = it->second;
     if (!im.loaded) r.load(im);
     if (im.missing) return;
@@ -198,6 +202,14 @@ void HdRenderer::on_after(Context& c) {
     r.sync(c, r.bank_);
     r.draw(b, im, x0, y0, x1, y1, mirror);
     ++r.hd_drawn_;
+}
+
+void HdRenderer::print_misses(FILE* f) const {
+    std::vector<std::pair<uint64_t, unsigned>> v(misses_.begin(), misses_.end());
+    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::fprintf(f, "HD misses (%zu header/mode pairs): header mode calls\n", v.size());
+    for (const auto& [k, n] : v)
+        std::fprintf(f, "  %08x %3d %u\n", static_cast<uint32_t>(k >> 32), static_cast<int32_t>(static_cast<uint32_t>(k)), n);
 }
 
 const std::vector<uint32_t>& HdRenderer::frame(const Context& c, uint32_t bank) {

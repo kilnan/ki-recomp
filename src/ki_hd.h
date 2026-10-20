@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +30,8 @@ public:
     // The HD picture of a framebuffer (SRAM offset 0x30000 or 0x58000), ARGB8888, kW x kH.
     const std::vector<uint32_t>& frame(const Context& c, uint32_t bank);
     unsigned hd_sprites_drawn() const { return hd_drawn_; }
+    // Blitter calls with no HD image, per header and mode (to find what a pack misses).
+    void print_misses(FILE* f) const;
 
 private:
     struct Image {
@@ -57,6 +60,8 @@ private:
     uint32_t bank_ = 0;
     int32_t s7_ = 0, t8_ = 0, t1_ = 4096, t3_ = 4096, t4_ = 2, mode_ = 0;
     unsigned hd_drawn_ = 0;
+    uint32_t header_ = 0;
+    std::unordered_map<uint64_t, unsigned> misses_;  // header << 32 | mode -> calls
 };
 
 }  // namespace ki

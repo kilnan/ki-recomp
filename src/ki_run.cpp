@@ -248,6 +248,9 @@ int main(int argc, char** argv) {
                 if (!wav_path.empty())
                     ki::write_wav(wav_path, dcs->samples(), static_cast<uint32_t>(dcs->sample_rate() + 0.5));
             }
+#ifdef KI_HAVE_HD
+            if (!hd_pack.empty()) hd.print_misses(stdout);
+#endif
             std::printf("\nstatus %08llx cause %08llx  sound writes %llu\n",
                         static_cast<unsigned long long>(ctx.cp0[ki::kCp0Status]),
                         static_cast<unsigned long long>(ki::mfc0(ctx, ki::kCp0Cause, 0)),
