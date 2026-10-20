@@ -18,9 +18,11 @@
 #include <string>
 #include <vector>
 
+#include "ki/hooks.h"
 #include "ki/kinst_board.h"
 #include "ki/runtime.h"
 #include "ki_boot.h"
+#include "ki_sprites.h"
 
 namespace {
 
@@ -45,7 +47,8 @@ int main(int argc, char** argv) {
     static std::string dump_dir;
     uint64_t frames = 600, dump_every = 60;
     static uint64_t dram_from = ~0ull, dram_to = 0;
-    static uint64_t save_at = 0, load_at = 0;
+    static uint64_t save_at = 0, load_at = 0, log_sprites = 0;
+    static std::string sprite_dir;
     static bool loaded_once = false;
     static ki::SaveState state;
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -67,6 +70,8 @@ int main(int argc, char** argv) {
         else if (k == "--trace-max") trace_max = std::stoull(v);
         else if (k == "--sound-roms") sound_roms = v;
         else if (k == "--wav-out") wav_out = v;
+        else if (k == "--log-sprites") log_sprites = std::stoull(v);  // print the blitter calls of frame N
+        else if (k == "--extract-sprites") sprite_dir = v;  // write each distinct sprite drawn to DIR
         else if (k == "--save-at") save_at = std::stoull(v);  // save-state test: save at frame N ...
         else if (k == "--load-at") load_at = std::stoull(v);  // ... and load it back at frame M (once)
         else if (k == "--dram-frames") {  // A-B: write DRAM at each VBLANK of frames A..B (dram_<frame>.bin)
@@ -120,6 +125,23 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
         if (frame == call_log_from) ctx.call_log = &call_log;
+        if (log_sprites && frame == log_sprites) {
+            std::printf("sprites drawn in frame %llu: hdr(v1) [h0 h2 h4 h6] x(s7) y(t8) sx(t1) sy(t3) t4 s2 mode(s6) a0 a3 s4 s5 gp s8\n",
+                        static_cast<unsigned long long>(frame));
+            ki::hooks::sprite = [](ki::Context& g) {
+                auto r = [&](int i) { return static_cast<int32_t>(ki::lo32(g.r[i])); };
+                uint32_t h = ki::lo32(g.r[3]);
+                auto hw = [&](int off) {
+                    uint32_t a = h + off - 0x88000000u;
+                    return a + 1 < g.dram.size() ? static_cast<int16_t>(g.dram[a] | g.dram[a + 1] << 8) : 0;
+                };
+                std::printf("  %08x [%5d %5d %5d %5d] %6d %6d %5d %5d %6d %6d %3d %6d %6d %6d %6d %4d %4d\n", h, hw(0),
+                            hw(2), hw(4), hw(6), r(23), r(24), r(9), r(11), r(12), r(18), r(22), r(4), r(7), r(20),
+                            r(21), r(28), r(30));
+            };
+        } else if (log_sprites && frame == log_sprites + 1) {
+            ki::hooks::sprite = nullptr;
+        }
         if (save_at && frame == save_at && !loaded_once) state.request(ctx);
         if (load_at && frame == load_at && !loaded_once && state.valid()) {
             // Save-state test: the frame at load_at is written before and after the load.
@@ -264,6 +286,7 @@ int main(int argc, char** argv) {
     }
     if (dcs) state.bind(board, dcs.get(), ki::read_sound_roms_or_die(sound_roms));
     else state.bind(board, nullptr, {});
+    if (!sprite_dir.empty()) ki::start_sprite_extraction(sprite_dir);
     ki::schedule(c);
     bool ran = false;
     for (;;) {

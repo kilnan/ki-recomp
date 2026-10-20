@@ -1,9 +1,14 @@
 #include "ki/runtime.h"
+#include "ki/hooks.h"
 
 #include <algorithm>
 #include <cmath>
 
 namespace ki {
+
+namespace hooks {
+Fn sprite = nullptr;
+}
 
 void raise_fault(Context&, Fault fault, uint32_t pc, uint32_t addr) {
     throw GuestFault{fault, pc, addr};

@@ -284,6 +284,9 @@ class Translator:
                  jr_ra_jumps: bool = False):
         self.trace = trace
         self.jr_ra_jumps = jr_ra_jumps
+        # Functions replaced by hand-written code: emitted as func_X_original,
+        # while every call and the table use func_X, which the override defines.
+        self.overrides: set[int] = set()
         self.img = img
         self.allow_unimplemented = allow_unimplemented
         self.timing = timing
@@ -531,7 +534,8 @@ class Translator:
                 slot_targets.add(insns[k + 1].vaddr)
                 if insns[k + 1].vaddr + 4 in addrs:
                     targets.add(insns[k + 1].vaddr + 4)
-        out = [f"void func_{fn.start:08x}(ki::Context& c) {{",
+        name = f"func_{fn.start:08x}" + ("_original" if fn.start in self.overrides else "")
+        out = [f"void {name}(ki::Context& c) {{",
                f"    // guest 0x{fn.start:08x}-0x{fn.end:08x} ({len(insns)} instructions)",
                "    bool br = false;", "    (void)br;", "    (void)c;"]
         uses_entry_ra = (bool(return_sites) and self.jr_ra_jumps) or any(i.name == "jr" and i.rs != 31 for i in insns)
@@ -866,6 +870,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--jr-ra-jumps", action="store_true",
                     help="in functions with local return sites, a `jr $ra` to anything but the "
                          "caller's $ra jumps there (the boot ROM's hand-off to the game)")
+    ap.add_argument("--override", action="append", default=[], type=lambda x: int(x, 16), metavar="ADDR",
+                    help="the function at ADDR is provided by hand-written code (func_ADDR); the "
+                         "translation is still emitted as func_ADDR_original for it to call; repeatable")
     ap.add_argument("--table-symbol", default="kFunctionTable",
                     help="name of the emitted address -> function table (kFunctionTable for the game, "
                          "kBootFunctionTable for the boot ROM)")
@@ -893,6 +900,7 @@ def main(argv: list[str]) -> int:
         img.add_data(open(path, "rb").read(), int(vram, 16))
     tr = Translator(img, args.allow_unimplemented, timing=not args.no_timing, trace=args.trace,
                     jr_ra_jumps=args.jr_ra_jumps)
+    tr.overrides = set(args.override)
     specs = [parse_func_spec(s) for s in args.func]
     if args.discover:
         explicit = {a for a, _ in specs}
@@ -978,8 +986,15 @@ def main(argv: list[str]) -> int:
         '#include "ki/runtime.h"', "",
         "namespace ki::gen {",
         *[f"void func_{fn.start:08x}(ki::Context& c);" for fn in funcs],
+        *[f"void func_{fn.start:08x}_original(ki::Context& c);  // overridden" for fn in funcs
+          if fn.start in tr.overrides],
         "}  // namespace ki::gen", "",
     ]
+    missing_overrides = tr.overrides - {fn.start for fn in funcs}
+    if missing_overrides:
+        print("--override of addresses that are not functions: " + " ".join(f"{a:08x}" for a in sorted(missing_overrides)),
+              file=sys.stderr)
+        return 2
     sym = args.table_symbol
     table = [
         f"const ki::FuncEntry ki::{sym}[] = {{",

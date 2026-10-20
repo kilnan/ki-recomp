@@ -103,6 +103,14 @@ if(KI_BUILD_FULL)
   foreach(e IN LISTS KI_EXTRA_ENTRIES)
     list(APPEND extra_args --func ${e})
   endforeach()
+  # Recompiled functions replaced by hand-written code in src/overrides/ (the
+  # translation stays available as func_<addr>_original).
+  set(KI_OVERRIDES "880107a8" CACHE STRING "functions provided by src/overrides")
+  set(KI_OVERRIDE_SOURCES src/overrides/sprites.cpp)
+  set(override_args "")
+  foreach(o IN LISTS KI_OVERRIDES)
+    list(APPEND override_args --override ${o})
+  endforeach()
   set(FULL_DIR "${CMAKE_BINARY_DIR}/gen_full")
   set(full_srcs "${FULL_DIR}/recompiled_table.cpp")
   math(EXPR last "${KI_SPLIT} - 1")
@@ -117,12 +125,12 @@ if(KI_BUILD_FULL)
     OUTPUT ${full_srcs} "${FULL_DIR}/recompiled.h"
     COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
             --image "${KI_CODE_IMAGE}" --vram 88000000 --expect-sha1 ${KI_CODE_IMAGE_SHA1} ${data_args}
-            --func 88000000 --func 880266c8 ${extra_args} --discover --discover-pointers
+            --func 88000000 --func 880266c8 ${extra_args} --discover --discover-pointers ${override_args}
             --out-dir "${FULL_DIR}" --split ${KI_SPLIT}
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_CODE_IMAGE}" ${data_deps}
     COMMENT "Recompiling the whole program"
     VERBATIM)
-  add_library(ki_full_code STATIC ${full_srcs})
+  add_library(ki_full_code STATIC ${full_srcs} ${KI_OVERRIDE_SOURCES})
   target_include_directories(ki_full_code PRIVATE "${FULL_DIR}")
   ki_code_library(ki_full_code)
   # The huge dispatch functions make -O2 very slow to compile; -O1 is enough for now.
@@ -169,18 +177,18 @@ if(KI_BUILD_FULL)
       OUTPUT ${trace_srcs} "${TRACE_DIR}/recompiled.h"
       COMMAND "${KI_PYTHON}" "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py"
               --image "${KI_CODE_IMAGE}" --vram 88000000 --expect-sha1 ${KI_CODE_IMAGE_SHA1} ${data_args}
-              --func 88000000 --func 880266c8 ${extra_args} --discover --discover-pointers --trace
+              --func 88000000 --func 880266c8 ${extra_args} --discover --discover-pointers --trace ${override_args}
               --out-dir "${TRACE_DIR}" --split ${KI_SPLIT}
       DEPENDS "${CMAKE_SOURCE_DIR}/tools/kirecomp/kirecomp.py" "${KI_CODE_IMAGE}" ${data_deps}
       COMMENT "Recompiling the whole program with trace hooks"
       VERBATIM)
-    add_library(ki_trace_code STATIC ${trace_srcs})
+    add_library(ki_trace_code STATIC ${trace_srcs} ${KI_OVERRIDE_SOURCES})
     target_include_directories(ki_trace_code PRIVATE "${TRACE_DIR}")
     ki_code_library(ki_trace_code)
     if(NOT MSVC)
       target_compile_options(ki_trace_code PRIVATE -O1 -Wno-unused-parameter)
     endif()
-    add_executable(ki_run_trace src/ki_run.cpp src/ki_boot.cpp)
+    add_executable(ki_run_trace src/ki_run.cpp src/ki_boot.cpp src/ki_sprites.cpp)
     target_link_libraries(ki_run_trace PRIVATE ki_boot_rom_code ki_trace_code)
   endif()
 
@@ -210,7 +218,7 @@ if(KI_BUILD_FULL)
 
   add_library(ki_boot STATIC src/ki_boot.cpp)
   target_link_libraries(ki_boot PUBLIC ki_boot_rom_code ki_runtime)
-  add_executable(ki_run src/ki_run.cpp)
+  add_executable(ki_run src/ki_run.cpp src/ki_sprites.cpp)
   target_link_libraries(ki_run PRIVATE ki_boot ki_full_code)
 
   # DCS model against a MAME capture (tools/mame_dcs_capture.py); not a ctest

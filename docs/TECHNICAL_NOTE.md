@@ -679,6 +679,52 @@ game. The jump rule is now limited to the boot ROM (`--jr-ra-jumps`).
   `deps-macos/` moved away the app loads only its own libraries.
 - Ad-hoc signature, and `LICENSES.txt` with the licenses of everything compiled in.
 
+## 7g. Overrides and sprites (towards HD sprites and a port, 20/10)
+
+**Overrides.** `kirecomp --override ADDR` emits the translation of a function
+as `func_ADDR_original`. Every call and the function table use `func_ADDR`,
+which hand-written code in `src/overrides/` defines and which may call the
+original. This is how recompiled code will be replaced or wrapped piece by
+piece. The first override wraps the sprite blitter 0x880107a8 and calls the
+host hook `ki::hooks::sprite` (`runtime/include/ki/hooks.h`). With no hook
+installed, a 20-minute soak run gives the same cycles and disk commands as
+before.
+
+**Sprite blitter 0x880107a8 [O, partly H].** Hand-written MIPS with arguments
+in registers:
+
+| register | meaning |
+|---|---|
+| `v1` | sprite header in DRAM: halfwords at +0 and +2 are presumably the anchor point, at +4 and +6 width and height [H] |
+| `s7`, `t8` | position, 1/256 pixel [O: +4096 moves the sprite 16 pixels] |
+| `t1`, `t3` | horizontal and vertical scale, 4.12 fixed point |
+| sign of `t4` | horizontal mirroring [H] |
+| `s2` | ±640, the framebuffer pitch; the sign flips vertically [H] |
+| `s6` | mode: 0 normal; 48 a squashed dark shadow; 96 and 144 seen on HUD parts |
+| `gp`, `s8` | vertical clip window |
+
+- The target framebuffer is chosen by bit 0 of 0x88086200.
+- In mode 0 pixels are 8-bit indices into a palette of halfwords in the zero
+  page (VA 0x0-0xfff, PA 0x08090000), which the caller fills for each sprite.
+  This is how alternate colours work [O: forcing mode 0 on another mode's
+  data faults on an odd zero-page address].
+- A fight frame makes about 36 calls: each fighter twice (shadow, then the
+  sprite), plus the HUD. Stages are not drawn here but by the tile renderer
+  0x88030b9c.
+
+**Extraction** (`ki_run --extract-sprites DIR`, `src/ki_sprites.cpp`). The
+pixel format does not need to be decoded.
+- At each blitter call with a new header and palette, the sprite is redrawn
+  alone by the recompiled blitter: same mode, scale 1, not mirrored, full clip
+  window, placed fully on screen.
+- It is drawn twice, on a black and on a white background. Pixels equal in both
+  are the sprite; the others are transparent.
+- The whole context is restored afterwards, with interrupts held off during
+  the extra draws.
+- **Result:** 576 distinct sprites in 100 s of play, with the run's last frame
+  identical to a run without extraction. The images are local game data and
+  are not committed.
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:
