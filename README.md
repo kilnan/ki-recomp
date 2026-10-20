@@ -227,7 +227,8 @@ and checks that it loads only its own libraries.
 | key | action |
 |---|---|
 | P | pause (H still works, to compare) |
-| F6 / F7 | opponent / stage of the next fight: the game's, then each in turn (title bar) |
+| R | reset (restarts like switching the board off and on) |
+| F6 / F7 | opponent / stage of the next fight: the game's, then each in turn (title bar; on a Mac keyboard hold Fn) |
 | H | HD sprites on/off (with `--hd-pack DIR`) |
 | F5 | save the state (taken at the next frame) |
 | F9 | load the saved state |

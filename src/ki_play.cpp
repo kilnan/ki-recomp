@@ -21,10 +21,16 @@
 // Player 2: I J K L move, Q W E / T Y U attacks... see kKeys. F2 = service
 // (test switch), Esc quits, Tab toggles unthrottled speed (no sound while on).
 // Gamepads work too, see kPadButtons. F5 saves the state, F9 loads it.
-// P pauses. --opponent NAME[,NAME...] and --stage N[,N...] choose the coming
+// P pauses, R resets. --opponent NAME[,NAME...] and --stage N[,N...] choose the coming
 // fights (in turn, one per fight); F6 / F7 cycle the opponent / stage of the
 // next fight (shown in the title bar).
 #include <SDL.h>
+#ifdef _WIN32
+#include <process.h>
+#define execv _execv
+#else
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -163,7 +169,10 @@ std::vector<uint32_t> saved_lbas(const std::string& path) {
 
 }  // namespace
 
+char** g_argv = nullptr;  // for the reset key
+
 int main(int argc, char** argv) {
+    g_argv = argv;
     std::string boot, disk, rom, sound_roms, data, hd_pack;
     static ki::FightChoice fight;
     int scale = 3;
@@ -383,6 +392,15 @@ int main(int argc, char** argv) {
                                     (fight.opponents.empty() ? "(game)" : ki::kCharacterNames[fight.opponents[0]]) +
                                     ", stage " + (fight.stages.empty() ? "(game)" : std::to_string(fight.stages[0]));
                     SDL_SetWindowTitle(window, t.c_str());
+                }
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_R) {
+                    // Reset: like switching the board off and on (same arguments).
+                    save();
+                    if (audio) SDL_CloseAudioDevice(audio);
+                    SDL_Quit();
+                    execv(g_argv[0], g_argv);
+                    std::perror("reset");
+                    std::exit(1);
                 }
                 if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_P) {
                     paused = !paused;
