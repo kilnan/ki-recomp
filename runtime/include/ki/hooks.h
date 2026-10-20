@@ -27,5 +27,10 @@ extern Fn fight_setup;
 // entry and after the copy.
 extern Fn panorama;
 extern Fn panorama_after;
+// Pre-rendered stage renderer 0x88030b9c: draws the whole screen from one of a
+// stage's 320x240 frames, each 8x8 block shifted horizontally by a fraction of
+// a pixel that grows with the block's depth (parallax). Entry and after.
+extern Fn prerendered;
+extern Fn prerendered_after;
 
 }  // namespace ki::hooks

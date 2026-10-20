@@ -262,6 +262,9 @@ int main(int argc, char** argv) {
                 std::printf("HD panorama pixels: %llu replaced, %llu left to the game\n",
                             static_cast<unsigned long long>(hd.panorama_pixels_hd()),
                             static_cast<unsigned long long>(hd.panorama_pixels_kept()));
+                std::printf("HD pre-rendered blocks: %llu replaced, %llu left to the game\n",
+                            static_cast<unsigned long long>(hd.prerendered_blocks_hd()),
+                            static_cast<unsigned long long>(hd.prerendered_blocks_kept()));
             }
 #endif
             std::printf("\nstatus %08llx cause %08llx  sound writes %llu\n",
@@ -350,7 +353,7 @@ int main(int argc, char** argv) {
         probe_frame = f;
         static std::map<uint64_t, std::pair<unsigned, unsigned>> pages;  // page -> loads, stores
         static std::set<uint64_t> active_frames;
-        ki::g_mem_probe = [](ki::Context& ctx, uint32_t va, int, uint32_t pc, bool store) {
+        ki::g_mem_probe = [](ki::Context& ctx, uint32_t va, int size, uint32_t pc, bool store) {
             if (pc - lo >= hi - lo || (probe_frame && board_frame != probe_frame)) return;
             static uint32_t va_lo = 0, va_hi = 0;  // KI_MEM_PROBE_VA=LO-HI: only these addresses
             static const bool va_set = [] {
@@ -358,6 +361,12 @@ int main(int argc, char** argv) {
                 return false;
             }();
             if (va_set && va - va_lo >= va_hi - va_lo) return;
+            // KI_MEM_TRACE=FILE: also every access in order (pc, address, size, store), binary.
+            static FILE* trace = std::getenv("KI_MEM_TRACE") ? std::fopen(std::getenv("KI_MEM_TRACE"), "wb") : nullptr;
+            if (trace) {
+                uint32_t rec[3] = {pc, va, static_cast<uint32_t>(size) | (store ? 0x100u : 0u)};
+                std::fwrite(rec, 4, 3, trace);
+            }
             static const bool by_pc = std::getenv("KI_MEM_PROBE_BY_PC") != nullptr;  // key: code page instead
             auto& e = pages[by_pc ? pc >> 6 : va >> 10];
             active_frames.insert(board_frame);

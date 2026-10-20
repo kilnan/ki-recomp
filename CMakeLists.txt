@@ -105,7 +105,7 @@ if(KI_BUILD_FULL)
   endforeach()
   # Recompiled functions replaced by hand-written code in src/overrides/ (the
   # translation stays available as func_<addr>_original).
-  set(KI_OVERRIDES "880107a8;8800e188;88018c98" CACHE STRING "functions provided by src/overrides")
+  set(KI_OVERRIDES "880107a8;8800e188;88018c98;88030b9c" CACHE STRING "functions provided by src/overrides")
   set(KI_OVERRIDE_SOURCES src/overrides/sprites.cpp src/overrides/fight.cpp)
   set(override_args "")
   foreach(o IN LISTS KI_OVERRIDES)

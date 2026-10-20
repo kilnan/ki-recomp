@@ -12,6 +12,8 @@ Fn sprite_after = nullptr;
 Fn fight_setup = nullptr;
 Fn panorama = nullptr;
 Fn panorama_after = nullptr;
+Fn prerendered = nullptr;
+Fn prerendered_after = nullptr;
 }
 
 void raise_fault(Context&, Fault fault, uint32_t pc, uint32_t addr) {

@@ -55,6 +55,17 @@ bool HdRenderer::load_pack(const std::string& dir) {
         pano.file = dir + "/pano_" + key;
         panoramas_[std::stoull(key, nullptr, 16)] = pano;
     }
+    std::ifstream pr(dir + "/prerendered.txt");
+    while (std::getline(pr, line)) {
+        std::istringstream ls(line);
+        std::string key;
+        Prerendered stage;
+        if (!(ls >> key >> stage.frames) || stage.frames <= 0) continue;
+        stage.prefix = dir + "/pre_" + key + "_";
+        stage.hd.resize(stage.frames);
+        stage.tried.assign(stage.frames, false);
+        prerendered_[std::stoull(key, nullptr, 16)] = stage;
+    }
     std::ifstream sh(dir + "/shapes.txt");
     while (std::getline(sh, line)) {
         std::istringstream ls(line);
@@ -65,7 +76,7 @@ bool HdRenderer::load_pack(const std::string& dir) {
         im.kix_file = dir + "/" + image + ".kix";
         shapes_[std::stoull(key, nullptr, 16)] = im;
     }
-    return !pack_.empty() || !panoramas_.empty();
+    return !pack_.empty() || !panoramas_.empty() || !prerendered_.empty();
 }
 
 void HdRenderer::attach() {
@@ -74,6 +85,8 @@ void HdRenderer::attach() {
     hooks::sprite_after = on_after;
     hooks::panorama = on_panorama;
     hooks::panorama_after = on_panorama_after;
+    hooks::prerendered = on_prerendered;
+    hooks::prerendered_after = on_prerendered_after;
 }
 
 void HdRenderer::detach() {
@@ -81,6 +94,8 @@ void HdRenderer::detach() {
     hooks::sprite_after = nullptr;
     hooks::panorama = nullptr;
     hooks::panorama_after = nullptr;
+    hooks::prerendered = nullptr;
+    hooks::prerendered_after = nullptr;
     g_hd = nullptr;
 }
 
@@ -497,6 +512,113 @@ void HdRenderer::on_panorama_after(Context& c) {
                             &p.hd[static_cast<size_t>(row * kScale + sy) * p.w * kScale + col * kScale], kScale * 4);
         }
     }
+}
+
+void HdRenderer::on_prerendered(Context& c) { g_hd->pre_dest_ = lo32(c.r[26]); }  // k0: the framebuffer
+
+void HdRenderer::on_prerendered_after(Context& c) {
+    // The stage file is loaded at 0x885b1000; its first word is the offset of
+    // the frames (320x240, 16-bit, one after the other).
+    HdRenderer& r = *g_hd;
+    if (r.prerendered_.empty()) return;
+    uint32_t bank = r.pre_dest_ & 0x1fffffffu;
+    if (bank != 0x30000 && bank != 0x58000) return;
+    constexpr uint32_t kStage = 0x5b1000;
+    constexpr int kFrame = 320 * 240;
+    uint32_t first = c.dram[kStage] | c.dram[kStage + 1] << 8 | c.dram[kStage + 2] << 16 |
+                     static_cast<uint32_t>(c.dram[kStage + 3]) << 24;
+    // After loading, the game has made the offset an address.
+    if (first - 0x88000000u < 0x800000u) first -= 0x88000000u + kStage;
+    if (first >= 0x100000u) return;
+    const uint32_t frames0 = kStage + first;
+    uint64_t key = 1469598103934665603ull;
+    for (int i = 0; i < 320 * 2 * 8; ++i) key = (key ^ c.dram[frames0 + i]) * 1099511628211ull;
+    auto it = r.prerendered_.find(key);
+    if (std::getenv("KI_HD_DEBUG")) {
+        static int shown = 0;
+        if (shown++ < 3)
+            std::fprintf(stderr, "pre-rendered stage: frames at %08x key %016llx%s\n", 0x88000000u + frames0,
+                         static_cast<unsigned long long>(key), it == r.prerendered_.end() ? " (not in pack)" : "");
+    }
+    if (it == r.prerendered_.end()) return;
+    Prerendered& st = it->second;
+    if (frames0 + static_cast<uint64_t>(st.frames) * kFrame * 2 > c.dram.size()) return;
+    const uint16_t* fb = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
+    auto src = [&](int f) { return reinterpret_cast<const uint16_t*>(&c.dram[frames0 + static_cast<uint32_t>(f) * kFrame * 2]); };
+    // Error of block (bx, by) drawn from frame f shifted by s/8 pixel (the
+    // renderer mixes two neighbouring columns in eighths).
+    auto block_error = [&](int f, int bx, int by, int s8) {
+        const uint16_t* sp = src(f);
+        int xi = s8 >> 3, w = s8 & 7, err = 0;
+        for (int y = by * 8; y < by * 8 + 8; ++y)
+            for (int x = bx * 8; x < bx * 8 + 8; ++x) {
+                int x0 = std::clamp(x + xi, 0, 319), x1 = std::clamp(x + xi + 1, 0, 319);
+                uint16_t a = sp[y * 320 + x0], b = sp[y * 320 + x1], v = fb[y * 320 + x];
+                for (int sh = 0; sh < 15; sh += 5) {
+                    int pa = (a >> sh) & 31, pb = (b >> sh) & 31, pv = (v >> sh) & 31;
+                    err += std::abs((pa * (8 - w) + pb * w) - pv * 8);
+                }
+            }
+        return err;
+    };
+    // The frame: the best one over a few blocks (the renderer uses one per call).
+    int frame = -1, best_total = 1 << 30;
+    for (int f = 0; f < st.frames; ++f) {
+        int total = 0;
+        for (int i = 0; i < 12; ++i) {
+            int bx = 4 + (i % 4) * 10, by = 3 + (i / 4) * 9, best = 1 << 30;
+            for (int s8 = -40; s8 <= 40; s8 += 2) best = std::min(best, block_error(f, bx, by, s8));
+            total += best;
+        }
+        if (total < best_total) best_total = total, frame = f;
+    }
+    if (frame < 0) return;
+    if (!st.tried[frame]) {
+        st.tried[frame] = true;
+        Image im;
+        im.file = st.prefix + std::to_string(frame) + ".ki4";
+        if (r.load(im), !im.missing && im.iw == 320 * kScale && im.ih == 240 * kScale) st.hd[frame] = std::move(im.argb);
+    }
+    if (st.hd[frame].empty()) return;
+    const std::vector<uint32_t>& hd = st.hd[frame];
+    Bank& b = r.bank_of(bank);
+    int last_shift = 0;
+    for (int by = 0; by < 30; ++by)
+        for (int bx = 0; bx < 40; ++bx) {
+            // Search around the previous block's shift first (neighbours have similar depth).
+            int best = 1 << 30, best_s = 0;
+            for (int s8 = -40; s8 <= 40; ++s8) {
+                int e = block_error(frame, bx, by, s8);
+                if (e < best || (e == best && std::abs(s8 - last_shift) < std::abs(best_s - last_shift))) best = e, best_s = s8;
+                if (best == 0) break;
+            }
+            // Mostly exact; a few rounding differences per block are fine.
+            if (best > 64 * 3 * 8 * 2) {
+                ++r.pre_blocks_kept_;
+                continue;
+            }
+            ++r.pre_blocks_hd_;
+            last_shift = best_s;
+            // In HD the shift is 4x finer: s/8 original pixel = s/2 HD pixel.
+            for (int y = 0; y < 8 * kScale; ++y) {
+                int hy = by * 8 * kScale + y;
+                const uint32_t* row = &hd[static_cast<size_t>(hy) * 320 * kScale];
+                uint32_t* out = &b.hd[static_cast<size_t>(hy) * kW + bx * 8 * kScale];
+                for (int x = 0; x < 8 * kScale; ++x) {
+                    int pos2 = (bx * 8 * kScale + x) * 2 + best_s;  // in half HD pixels
+                    int h0 = std::clamp(pos2 >> 1, 0, 320 * kScale - 1), h1 = std::clamp((pos2 >> 1) + 1, 0, 320 * kScale - 1);
+                    uint32_t p0 = row[h0];
+                    if (pos2 & 1) {
+                        uint32_t p1 = row[h1];
+                        p0 = 0xff000000u | (((p0 >> 16 & 255) + (p1 >> 16 & 255)) / 2) << 16 |
+                             (((p0 >> 8 & 255) + (p1 >> 8 & 255)) / 2) << 8 | ((p0 & 255) + (p1 & 255)) / 2;
+                    }
+                    out[x] = p0;
+                }
+            }
+            for (int y = by * 8; y < by * 8 + 8; ++y)
+                std::memcpy(&b.shadow[y * 320 + bx * 8], fb + y * 320 + bx * 8, 16);
+        }
 }
 
 const std::vector<uint32_t>& HdRenderer::frame(const Context& c, uint32_t bank) {

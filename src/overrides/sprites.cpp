@@ -20,4 +20,11 @@ void func_88018c98(ki::Context& c) {
     if (ki::hooks::panorama_after) ki::hooks::panorama_after(c);
 }
 
+// The pre-rendered stage renderer (whole screen from a stage frame).
+void func_88030b9c(ki::Context& c) {
+    if (ki::hooks::prerendered) ki::hooks::prerendered(c);
+    func_88030b9c_original(c);
+    if (ki::hooks::prerendered_after) ki::hooks::prerendered_after(c);
+}
+
 }  // namespace ki::gen

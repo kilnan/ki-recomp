@@ -804,7 +804,16 @@ there too; with 256 bytes there are 476 keys.
   - Each row has 4 margin pixels, then the 960 columns, which wrap around.
   - The game draws its billboards into the DRAM copy of the picture.
 - **Floors.** 0x8801c740 and its siblings scale a texture row by row into a trapezoid, the "mode 7" floor.
-- **Pre-rendered stages** (Cinder, Orchid, …). Whole 320×242 16-bit frames, one per camera position, are drawn by the hand-written renderer at 0x88030b9c. Not hooked yet.
+- **Pre-rendered stages** (0–4 and 10–15). The stage file (at 0x885b1000) starts with the offset of its frames, which the game turns into an address. Then come 8 frames of 320×240 at 16 bits (4 for stage 13), one per camera angle.
+  - The hand-written renderer 0x88030b9c draws the whole screen from one frame in 8×8 blocks.
+  - A byte per block (0x88030c3c) acts as a depth map. The block is shifted horizontally by a fraction of a pixel, in eighths, that grows with that byte, mixing two neighbouring columns. That parallax is what makes the room seem to turn between the 8 angles. Measured: depth 5 → 0, 8 → 1.5, 15 → 2.5 pixels in one frame.
+
+**HD pre-rendered stages** (`tools/hd/prerendered.py`, `prerendered.txt`).
+- The 8 frames are upscaled once.
+- After each call of the renderer, the player finds the frame from a few blocks. For each block it then finds the shift, in eighths, that reproduces the drawn pixels from the original frame in DRAM.
+- It samples the HD frame with that shift, which is 4x finer in HD.
+- Blocks that do not match stay the game's. On Cinder's stage, 72% of the blocks become HD.
+- The search costs about 3 ms per frame. Decoding the shift from the renderer's registers would remove it.
 
 **HD panoramas** (`tools/hd/panorama.py`, `panoramas.txt` in a pack).
 - **Upscale.** The layers are read from the stage file on disk, without billboards, and upscaled once with columns wrapped on both sides.

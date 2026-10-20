@@ -35,6 +35,8 @@ public:
     void print_misses(FILE* f) const;
     uint64_t panorama_pixels_hd() const { return pano_hd_; }
     uint64_t panorama_pixels_kept() const { return pano_kept_; }
+    uint64_t prerendered_blocks_hd() const { return pre_blocks_hd_; }
+    uint64_t prerendered_blocks_kept() const { return pre_blocks_kept_; }
 
 private:
     struct Image {
@@ -68,6 +70,19 @@ private:
         std::vector<uint16_t> original;
         std::vector<uint32_t> hd;
     };
+    // A pre-rendered stage (prerendered.txt): HD pictures of its 320x240 frames,
+    // read when first used. The originals are taken from DRAM (the stage file).
+    struct Prerendered {
+        std::string prefix;
+        int frames = 0;
+        std::vector<std::vector<uint32_t>> hd;  // per frame, (320 * 4) x (240 * 4), empty until loaded
+        std::vector<bool> tried;
+    };
+    static void on_prerendered(Context& c);
+    static void on_prerendered_after(Context& c);
+    std::unordered_map<uint64_t, Prerendered> prerendered_;  // key: FNV of frame 0's first 8 rows
+    uint32_t pre_dest_ = 0;
+    uint64_t pre_blocks_hd_ = 0, pre_blocks_kept_ = 0;
     static void on_panorama(Context& c);
     static void on_panorama_after(Context& c);
     bool load_panorama(Panorama& p);
