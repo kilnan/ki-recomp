@@ -85,9 +85,9 @@ void HdRenderer::attach() {
     hooks::sprite_after = on_after;
     hooks::panorama = on_panorama;
     hooks::panorama_after = on_panorama_after;
-    // Pre-rendered stages: experimental (KI_HD_PRERENDERED=1). The block shift
-    // model reproduces only some camera positions; see TECHNICAL_NOTE.
-    if (std::getenv("KI_HD_PRERENDERED")) {
+    // Pre-rendered stages (off with KI_HD_PRERENDERED=0); see TECHNICAL_NOTE.
+    const char* pre = std::getenv("KI_HD_PRERENDERED");
+    if (!pre || std::strcmp(pre, "0") != 0) {
         hooks::prerendered = on_prerendered;
         hooks::prerendered_after = on_prerendered_after;
     }
@@ -658,13 +658,14 @@ void HdRenderer::on_prerendered_after(Context& c) {
             }
         return err;
     };
+    static const int kRange = std::getenv("KI_PRE_RANGE") ? std::atoi(std::getenv("KI_PRE_RANGE")) : 160;  // eighths
     // The frame: the best one over a few blocks (the renderer uses one per call).
     int frame = -1, best_total = 1 << 30;
     for (int f = 0; f < st.frames; ++f) {
         int total = 0;
         for (int i = 0; i < 12; ++i) {
             int bx = 4 + (i % 4) * 10, by = 3 + (i / 4) * 9, best = 1 << 30;
-            for (int s8 = -40; s8 <= 40; s8 += 2) best = std::min(best, block_error(f, bx, by, s8));
+            for (int s8 = -kRange; s8 <= kRange; s8 += 2) best = std::min(best, block_error(f, bx, by, s8));
             total += best;
         }
         if (total < best_total) best_total = total, frame = f;
@@ -685,14 +686,22 @@ void HdRenderer::on_prerendered_after(Context& c) {
     int matched = 0, last_shift = 0;
     for (int by = 0; by < 30; ++by)
         for (int bx = 0; bx < 40; ++bx) {
-            int best = 1 << 30, best_s = 0;
-            for (int s8 = -40; s8 <= 40; ++s8) {
-                int e = block_error(frame, bx, by, s8);
-                if (e < best || (e == best && std::abs(s8 - last_shift) < std::abs(best_s - last_shift))) best = e, best_s = s8;
-                if (best == 0) break;
+            // The previous block's shift first (neighbours mostly share a depth),
+            // then whole pixels over the range, then eighths around the best.
+            int best = block_error(frame, bx, by, last_shift), best_s = last_shift;
+            if (best != 0) {
+                for (int s8 = -kRange; s8 <= kRange && best; s8 += 8) {
+                    int e = block_error(frame, bx, by, s8);
+                    if (e < best) best = e, best_s = s8;
+                }
+                int coarse = best_s;
+                for (int s8 = coarse - 7; s8 <= coarse + 7 && best; ++s8) {
+                    int e = block_error(frame, bx, by, s8);
+                    if (e < best) best = e, best_s = s8;
+                }
             }
             // Mostly exact; a few rounding differences per block are fine.
-            static const int limit = std::getenv("KI_PRE_LIMIT") ? std::atoi(std::getenv("KI_PRE_LIMIT")) : 64 * 3 * 8 / 2;
+            static const int limit = std::getenv("KI_PRE_LIMIT") ? std::atoi(std::getenv("KI_PRE_LIMIT")) : 64 * 3 * 8;
             shifts[by][bx] = best <= limit ? best_s : kNoMatch;
             if (shifts[by][bx] != kNoMatch) ++matched, last_shift = best_s;
         }
@@ -700,7 +709,8 @@ void HdRenderer::on_prerendered_after(Context& c) {
         static int calls = 0;
         if (++calls % 50 == 0) std::fprintf(stderr, "pre-rendered: frame %d, %d/1200 blocks match\n", frame, matched);
     }
-    if (matched < 1200 * 9 / 10) {
+    static const int kGate = std::getenv("KI_PRE_GATE") ? std::atoi(std::getenv("KI_PRE_GATE")) : 1200 * 85 / 100;
+    if (matched < kGate) {
         r.pre_blocks_kept_ += 1200;
         return;
     }
