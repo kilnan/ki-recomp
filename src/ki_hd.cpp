@@ -92,6 +92,8 @@ void HdRenderer::attach() {
     hooks::sprite_after = on_after;
     hooks::panorama = on_panorama;
     hooks::panorama_after = on_panorama_after;
+    hooks::prerendered_setup = on_prerendered_setup_before;
+    hooks::prerendered_setup_after = on_prerendered_setup;
     hooks::screen_save_after = on_screen_save;
     hooks::screen_restore_after = on_screen_restore;
     // Pre-rendered stages (off with KI_HD_PRERENDERED=0); see TECHNICAL_NOTE.
@@ -107,6 +109,8 @@ void HdRenderer::detach() {
     hooks::sprite_after = nullptr;
     hooks::panorama = nullptr;
     hooks::panorama_after = nullptr;
+    hooks::prerendered_setup = nullptr;
+    hooks::prerendered_setup_after = nullptr;
     hooks::screen_save_after = nullptr;
     hooks::screen_restore_after = nullptr;
     hooks::prerendered = nullptr;
@@ -649,7 +653,53 @@ void HdRenderer::on_panorama_after(Context& c) {
 
 constexpr int kNoMatch = 1 << 20;
 
-void HdRenderer::on_prerendered(Context& c) { g_hd->pre_dest_ = lo32(c.r[26]); }  // k0: the framebuffer
+void HdRenderer::on_prerendered_setup_before(Context& c) {
+    HdRenderer& r = *g_hd;
+    r.pre_f0_ = lo32(c.f[0]);
+    r.pre_f1_ = lo32(c.f[1]);
+    r.pre_f2_ = lo32(c.f[2]);
+    r.pre_f4_ = static_cast<int32_t>(lo32(c.f[4]));
+}
+
+void HdRenderer::on_prerendered_setup(Context& c) {
+    HdRenderer& r = *g_hd;
+    if (r.pre_rows_.empty()) r.pre_s7_ = lo32(c.r[23]);  // the depth bytes of block 0
+    PreRow row;
+    row.gp = lo32(c.r[28]);
+    row.staged = r.pre_f4_ >= 0;
+    row.f2 = r.pre_f2_;
+    if (row.staged) {
+        // As 0x8803108c: 2 x 80 chunks, each 4 pixels x 4 rows, at f2 + 2 * index.
+        uint32_t a0 = r.pre_f0_ - 0x88000000u, a1 = r.pre_f1_;
+        auto word = [&](uint32_t off) {
+            return off + 4 <= c.dram.size() ? static_cast<uint32_t>(c.dram[off] | c.dram[off + 1] << 8 | c.dram[off + 2] << 16 |
+                                                                    static_cast<uint32_t>(c.dram[off + 3]) << 24)
+                                            : 0u;
+        };
+        for (int n = 0; n < 160; ++n) {
+            uint32_t t1 = (word(a0) << a1) >> 14;
+            if (a1 >= 15) t1 |= word(a0 + 4) >> (46 - a1);
+            row.chunk[n] = static_cast<int>(t1 & 0x3ffff);  // pixels from f2
+            a1 += 18;
+            if (a1 >= 32) a1 &= 31, a0 += 4;
+        }
+        std::memcpy(row.original, &c.sram[0x2ce00], sizeof row.original);
+    }
+    r.pre_rows_.push_back(row);
+}
+
+void HdRenderer::on_prerendered(Context& c) {
+    // The renderer's inputs (0x88030b9c): k0 framebuffer, gp source pixels
+    // (in a stage frame), s7 one depth byte per 8x8 block, k1 the camera
+    // parameter (0..8), v0 & 7 rows the picture is moved down by.
+    HdRenderer& r = *g_hd;
+    r.pre_dest_ = lo32(c.r[26]);
+    r.pre_gp_ = lo32(c.r[28]);
+    r.pre_s7_ = lo32(c.r[23]);
+    r.pre_k_ = std::clamp(static_cast<int32_t>(lo32(c.r[27])), 0, 8);
+    r.pre_rows_.clear();
+    r.pre_v0_ = static_cast<int>(lo32(c.r[2]) & 7);
+}
 
 void HdRenderer::on_prerendered_after(Context& c) {
     // The stage file is loaded at 0x885b1000; its first word is the offset of
@@ -679,123 +729,125 @@ void HdRenderer::on_prerendered_after(Context& c) {
     Prerendered& st = it->second;
     if (frames0 + static_cast<uint64_t>(st.frames) * kFrame * 2 > c.dram.size()) return;
     const uint16_t* fb = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
-    if (const char* d = std::getenv("KI_PRE_DUMP")) {  // debug: the screen as the renderer left it, call N
-        static int calls = 0;
-        if (++calls == std::atoi(d)) {
-            if (FILE* f = std::fopen("pre_fb.bin", "wb")) {
-                std::fwrite(fb, 2, 320 * 240, f);
-                std::fclose(f);
-            }
-            if (FILE* f = std::fopen("pre_frames.bin", "wb")) {
-                std::fwrite(&c.dram[frames0], 2, static_cast<size_t>(st.frames) * kFrame, f);
-                std::fclose(f);
-            }
-        }
-    }
-    auto src = [&](int f) { return reinterpret_cast<const uint16_t*>(&c.dram[frames0 + static_cast<uint32_t>(f) * kFrame * 2]); };
-    // Error of block (bx, by) drawn from frame f shifted by s/8 pixel (the
-    // renderer mixes two neighbouring columns in eighths).
-    auto block_error = [&](int f, int bx, int by, int s8) {
-        const uint16_t* sp = src(f);
-        int xi = s8 >> 3, w = s8 & 7, err = 0;
-        for (int y = by * 8; y < by * 8 + 8; ++y)
-            for (int x = bx * 8; x < bx * 8 + 8; ++x) {
-                int x0 = std::clamp(x + xi, 0, 319), x1 = std::clamp(x + xi + 1, 0, 319);
-                uint16_t a = sp[y * 320 + x0], b = sp[y * 320 + x1], v = fb[y * 320 + x];
-                for (int sh = 0; sh < 15; sh += 5) {
-                    int pa = (a >> sh) & 31, pb = (b >> sh) & 31, pv = (v >> sh) & 31;
-                    err += std::abs((pa * (8 - w) + pb * w) - pv * 8);
-                }
-            }
-        return err;
-    };
-    static const int kRange = std::getenv("KI_PRE_RANGE") ? std::atoi(std::getenv("KI_PRE_RANGE")) : 160;  // eighths
-    // The frame: the best one over a few blocks (the renderer uses one per call).
-    int frame = -1, best_total = 1 << 30;
-    for (int f = 0; f < st.frames; ++f) {
-        int total = 0;
-        for (int i = 0; i < 12; ++i) {
-            int bx = 4 + (i % 4) * 10, by = 3 + (i / 4) * 9, best = 1 << 30;
-            for (int s8 = -kRange; s8 <= kRange; s8 += 2) best = std::min(best, block_error(f, bx, by, s8));
-            total += best;
-        }
-        if (total < best_total) best_total = total, frame = f;
-    }
-    if (frame < 0) return;
-    if (!st.tried[frame]) {
-        st.tried[frame] = true;
-        Image im;
-        im.file = st.prefix + std::to_string(frame) + ".ki4";
-        if (r.load(im), !im.missing && im.iw == 320 * kScale && im.ih == 240 * kScale) st.hd[frame] = std::move(im.argb);
-    }
-    if (st.hd[frame].empty()) return;
-    const std::vector<uint32_t>& hd = st.hd[frame];
-    // First every block's shift; the HD frame is used only if nearly all blocks
-    // match (between two camera angles the renderer does something this model
-    // does not cover, and a mix of matched and unmatched blocks looks broken).
-    int shifts[30][40];
-    int matched = 0, last_shift = 0;
-    for (int by = 0; by < 30; ++by)
-        for (int bx = 0; bx < 40; ++bx) {
-            // The previous block's shift first (neighbours mostly share a depth),
-            // then whole pixels over the range, then eighths around the best.
-            int best = block_error(frame, bx, by, last_shift), best_s = last_shift;
-            if (best != 0) {
-                for (int s8 = -kRange; s8 <= kRange && best; s8 += 8) {
-                    int e = block_error(frame, bx, by, s8);
-                    if (e < best) best = e, best_s = s8;
-                }
-                int coarse = best_s;
-                for (int s8 = coarse - 7; s8 <= coarse + 7 && best; ++s8) {
-                    int e = block_error(frame, bx, by, s8);
-                    if (e < best) best = e, best_s = s8;
-                }
-            }
-            // Mostly exact; a few rounding differences per block are fine.
-            static const int limit = std::getenv("KI_PRE_LIMIT") ? std::atoi(std::getenv("KI_PRE_LIMIT")) : 64 * 3 * 8;
-            shifts[by][bx] = best <= limit ? best_s : kNoMatch;
-            if (shifts[by][bx] != kNoMatch) ++matched, last_shift = best_s;
-        }
+    // Block i (row br, column bc) shows its row's source from column bc*8,
+    // moved right by s = (depth * k) >> 3 half pixels (an odd s averages two
+    // neighbouring columns), at screen row v0 + 8*br: the parallax between the
+    // stage's angles.
     if (std::getenv("KI_HD_DEBUG")) {
-        static int calls = 0;
-        if (++calls % 50 == 0) std::fprintf(stderr, "pre-rendered: frame %d, %d/1200 blocks match\n", frame, matched);
+        static int shown = 0;
+        if (shown++ < 4)
+            std::fprintf(stderr, "pre-rendered call: k0 %08x s7 %08x k %d v0 %d rows %zu (%s first)\n", r.pre_dest_, r.pre_s7_, r.pre_k_,
+                         r.pre_v0_, r.pre_rows_.size(), !r.pre_rows_.empty() && r.pre_rows_[0].staged ? "staged" : "direct");
     }
-    static const int kGate = std::getenv("KI_PRE_GATE") ? std::atoi(std::getenv("KI_PRE_GATE")) : 1200 * 85 / 100;
-    if (matched < kGate) {
-        r.pre_blocks_kept_ += 1200;
-        return;
-    }
+    // The frames are one tall picture (320 x 240*frames). Each row of blocks
+    // reads either a frame directly (still camera) or the 320x8 row the setup
+    // step assembled from 4x4 chunks of the frames (moving camera); see hooks.h.
+    const uint16_t* sp = reinterpret_cast<const uint16_t*>(&c.dram[frames0]);
     Bank& b = r.bank_of(bank);
-    for (int by = 0; by < 30; ++by)
-        for (int bx = 0; bx < 40; ++bx) {
-            int best_s = shifts[by][bx];
-            if (best_s == kNoMatch) {
-                // Inside a matched frame: the neighbour's shift (same depth, usually a flat area).
-                best_s = bx > 0 && shifts[by][bx - 1] != kNoMatch ? shifts[by][bx - 1] : 0;
+    const int k = r.pre_k_, v0 = r.pre_v0_;
+    const int rows_total = st.frames * 240;
+    auto avg = [](uint16_t a, uint16_t bb) {  // as the renderer (0x88030db4): ((a + 0x421) & 0x7bde) + (b & 0x7bde), halved
+        return static_cast<uint16_t>(((((a + 0x0421) & 0x7bde) + (bb & 0x7bde)) >> 1) & 0x7fff);
+    };
+    auto hd_frame = [&](int f) -> const std::vector<uint32_t>* {
+        if (f < 0 || f >= st.frames) return nullptr;
+        if (!st.tried[f]) {
+            st.tried[f] = true;
+            Image im;
+            im.file = st.prefix + std::to_string(f) + ".ki4";
+            if (r.load(im), !im.missing && im.iw == 320 * kScale && im.ih == 240 * kScale) st.hd[f] = std::move(im.argb);
+        }
+        return st.hd[f].empty() ? nullptr : &st.hd[f];
+    };
+    // HD colour at (hx, hy) of the tall picture, in HD pixels.
+    auto hd_at = [&](int hx, int hy) -> uint32_t {
+        const std::vector<uint32_t>* hf = hd_frame(hy / (240 * kScale));
+        if (!hf) return 0;
+        return (*hf)[static_cast<size_t>(hy % (240 * kScale)) * 320 * kScale + std::clamp(hx, 0, 320 * kScale - 1)];
+    };
+    const uint32_t depth = r.pre_s7_ - 0x88000000u;
+    if (depth + 1200 > c.dram.size()) return;
+    std::vector<uint32_t> hdrow(static_cast<size_t>(320 * kScale + 16) * 8 * kScale);
+    for (int br = 0; br < static_cast<int>(r.pre_rows_.size()) && br < 30; ++br) {
+        const PreRow& row = r.pre_rows_[br];
+        int y0 = v0 + br * 8;
+        if (y0 + 8 > 240) break;
+        // The row's 8 source lines: originals (to check the model) and HD.
+        uint16_t orig[8][321];
+        bool usable = true;
+        if (row.staged) {
+            int base = static_cast<int>(static_cast<int64_t>(row.f2) - 0x88000000 - frames0) / 2;
+            for (int y = 0; y < 8; ++y) {
+                for (int x = 0; x < 320; ++x) orig[y][x] = row.original[y * 320 + x];
+                orig[y][320] = orig[y][319];
+            }
+            for (int n = 0; n < 160 && usable; ++n) {
+                int g = n / 80, j = n % 80, p = base + row.chunk[n];
+                // Memory is linear: a chunk near the right edge continues on the next line.
+                for (int y = 0; y < 4 && usable; ++y)
+                    for (int x = 0; x < 4; ++x) {
+                        int q = p + y * 320 + x, sy = q / 320, sx = q % 320;
+                        if (q < 0 || sy >= rows_total) { usable = false; break; }
+                        for (int y4 = 0; y4 < kScale; ++y4)
+                            for (int x4 = 0; x4 < kScale; ++x4)
+                                hdrow[static_cast<size_t>((g * 4 + y) * kScale + y4) * (320 * kScale + 16) + (j * 4 + x) * kScale + x4] =
+                                    hd_at(sx * kScale + x4, sy * kScale + y4);
+                    }
+            }
+        } else {
+            int p0 = static_cast<int>(static_cast<int64_t>(row.gp) - 0x88000000 - frames0) / 2;
+            int sy = p0 / 320, sx = p0 % 320;
+            if (p0 < 0 || sy + 8 > rows_total) usable = false;
+            for (int y = 0; y < 8 && usable; ++y) {
+                for (int x = 0; x < 321; ++x) orig[y][x] = sp[(sy + y) * 320 + std::min(sx + x, 319)];
+                for (int y4 = 0; y4 < kScale; ++y4)
+                    for (int x = 0; x < 320 * kScale + 16; ++x)
+                        hdrow[static_cast<size_t>(y * kScale + y4) * (320 * kScale + 16) + x] =
+                            hd_at(sx * kScale + std::min(x, 320 * kScale - 1), (sy + y) * kScale + y4);
+            }
+        }
+        if (!usable) {
+            r.pre_blocks_kept_ += 40;
+            continue;
+        }
+        for (int bc = 0; bc < 40; ++bc) {
+            int i = br * 40 + bc;
+            int d = static_cast<int8_t>(c.dram[depth + i]);
+            int sh = (d * k) >> 3;  // half pixels
+            int sx = bc * 8 + (sh >> 1);
+            if (sx < 0 || sx + 9 > 321) {
+                ++r.pre_blocks_kept_;
+                continue;
+            }
+            // The model must give exactly the pixels drawn (not, e.g., the animated fire).
+            bool same = true;
+            for (int y = 0; y < 8 && same; ++y)
+                for (int x = 0; x < 8; ++x) {
+                    uint16_t a = orig[y][sx + x];
+                    uint16_t v = (sh & 1) ? avg(a, orig[y][sx + x + 1]) : a;
+                    if (v != fb[(y0 + y) * 320 + bc * 8 + x]) {
+                        same = false;
+                        break;
+                    }
+                }
+            if (!same) {
+                ++r.pre_blocks_kept_;
+                continue;
             }
             ++r.pre_blocks_hd_;
-            // In HD the shift is 4x finer: s/8 original pixel = s/2 HD pixel.
+            // Half an original pixel is exactly 2 HD pixels: sampled there, not averaged.
+            const int hx0 = sx * kScale + (sh & 1) * kScale / 2;
             for (int y = 0; y < 8 * kScale; ++y) {
-                int hy = by * 8 * kScale + y;
-                const uint32_t* row = &hd[static_cast<size_t>(hy) * 320 * kScale];
-                uint32_t* out = &b.hd[static_cast<size_t>(hy) * kW + bx * 8 * kScale];
-                for (int x = 0; x < 8 * kScale; ++x) {
-                    int pos2 = (bx * 8 * kScale + x) * 2 + best_s;  // in half HD pixels
-                    int h0 = std::clamp(pos2 >> 1, 0, 320 * kScale - 1), h1 = std::clamp((pos2 >> 1) + 1, 0, 320 * kScale - 1);
-                    uint32_t p0 = row[h0];
-                    if (pos2 & 1) {
-                        uint32_t p1 = row[h1];
-                        p0 = 0xff000000u | (((p0 >> 16 & 255) + (p1 >> 16 & 255)) / 2) << 16 |
-                             (((p0 >> 8 & 255) + (p1 >> 8 & 255)) / 2) << 8 | ((p0 & 255) + (p1 & 255)) / 2;
-                    }
-                    out[x] = p0;
-                }
+                const uint32_t* src = &hdrow[static_cast<size_t>(y) * (320 * kScale + 16)];
+                uint32_t* out = &b.hd[static_cast<size_t>(y0 * kScale + y) * kW + bc * 8 * kScale];
+                for (int x = 0; x < 8 * kScale; ++x) out[x] = src[std::min(hx0 + x, 320 * kScale + 15)];
             }
-            for (int y = by * 8; y < by * 8 + 8; ++y) {
-                std::memcpy(&b.shadow[y * 320 + bx * 8], fb + y * 320 + bx * 8, 16);
-                std::memset(&b.owned[y * 320 + bx * 8], 1, 8);
+            for (int y = y0; y < y0 + 8; ++y) {
+                std::memcpy(&b.shadow[y * 320 + bc * 8], fb + y * 320 + bc * 8, 16);
+                std::memset(&b.owned[y * 320 + bc * 8], 1, 8);
             }
         }
+    }
 }
 
 void HdRenderer::on_screen_save(Context& c) {

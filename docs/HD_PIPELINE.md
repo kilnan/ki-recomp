@@ -162,5 +162,5 @@ Merge into `data/hd/pack`:
 **Open:**
 - **Winner portraits.** The "WINNER" screen picture is decoded from disk (compressed, decoder around 0x88028dc0) into 0x884a0000. `ki_run --hd-pack P --dump-screens DIR` dumps the pictures, and `screens.txt` + `screen_<key>.ki4` replace them. The portraits still have to be collected (one won fight per character) and upscaled.
 - **Mode-7 floors.** Stage 8's desert and stage 7's rooftop floor (0x8801c740 and its siblings) need their drawing redone at 4x.
-- **Pre-rendered stages while the camera moves.** About 70% of the blocks match, so those frames stay upscaled normally. Decode the parallax shift from the renderer's parameters instead of fitting it. The fire is animated separately.
+- **Pre-rendered stages: the animated fire.** It is drawn separately and stays upscaled normally (about 1–2% of the blocks). The camera movement itself is handled exactly (see TECHNICAL_NOTE "Stages").
 - **Smaller pack.** Use PNG or WebP instead of zlib ARGB.

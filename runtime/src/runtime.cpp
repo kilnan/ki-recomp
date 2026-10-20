@@ -14,6 +14,8 @@ Fn panorama = nullptr;
 Fn panorama_after = nullptr;
 Fn prerendered = nullptr;
 Fn prerendered_after = nullptr;
+Fn prerendered_setup = nullptr;
+Fn prerendered_setup_after = nullptr;
 Fn screen_save_after = nullptr;
 Fn screen_restore_after = nullptr;
 }

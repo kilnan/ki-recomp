@@ -36,6 +36,11 @@ extern Fn prerendered_after;
 // brightness) at 0x884a0000 and copies it into the target framebuffer
 // (pointer at 0x88040dc8); 0x8802309c copies the saved frame there again.
 // Called after each.
+// 0x8803108c, called by the renderer before each row of 8x8 blocks: builds the
+// row's 320x8 pixels at 0x8002ce00 from 160 chunk indices (18 bits each, read
+// from f0/f1, relative to f2), or, if f4 < 0, points gp into a frame directly.
+extern Fn prerendered_setup;
+extern Fn prerendered_setup_after;
 extern Fn screen_save_after;
 extern Fn screen_restore_after;
 

@@ -804,20 +804,20 @@ there too; with 256 bytes there are 476 keys.
   - Each row has 4 margin pixels, then the 960 columns, which wrap around.
   - The game draws its billboards into the DRAM copy of the picture.
 - **Floors.** 0x8801c740 and its siblings scale a texture row by row into a trapezoid, the "mode 7" floor.
-- **Pre-rendered stages** (0–4 and 10–15). The stage file (at 0x885b1000) starts with the offset of its frames, which the game turns into an address. Then come 8 frames of 320×240 at 16 bits (4 for stage 13), one per camera angle.
-  - The hand-written renderer 0x88030b9c draws the whole screen from one frame in 8×8 blocks.
-  - A byte per block (0x88030c3c) acts as a depth map. The block is shifted horizontally by a fraction of a pixel, in eighths, that grows with that byte, mixing two neighbouring columns. That parallax is what makes the room seem to turn between the 8 angles. Measured: depth 5 → 0, 8 → 1.5, 15 → 2.5 pixels in one frame.
+- **Pre-rendered stages** (0–4 and 10–15). The stage file (at 0x885b1000) starts with the offset of its frames, which the game turns into an address: 8 frames of 320×240 at 16 bits (4 for stage 13), one tall picture in memory.
+  - **Renderer.** 0x88030b9c draws the screen in rows of 8×8 blocks, at screen row v0&7 + 8·row.
+  - **Row source.** Before each row, 0x8803108c builds the row's source:
+    - **still camera** (f4 < 0): gp points straight into a frame;
+    - **moving camera:** it assembles a 320×8 row at 0x8002ce00 from 160 chunks of 4×4 pixels. Each chunk is an 18-bit index read from a bit stream (f0 pointer, f1 bit offset), counted in pixels from f2. It is a small video codec over the 8 key frames.
+  - **Parallax.** Each block then has a depth byte (s7, signed) and the camera parameter k = min(k1, 8). The block reads its row's source at column 8·c + (d·k >> 3)/2, in half pixels.
+  - **Averaging.** An odd shift averages two neighbouring columns as ((a + 0x421) & 0x7bde) + (b & 0x7bde), halved.
 
 **HD pre-rendered stages** (`tools/hd/prerendered.py`, `prerendered.txt`).
-- The 8 frames are upscaled once.
-- After each call of the renderer, the player finds the frame from a few blocks. For each block it then finds the shift, in eighths, that reproduces the drawn pixels from the original frame in DRAM.
-- It samples the HD frame with that shift, which is 4x finer in HD.
-- **Accuracy.** In a fight on stage 1, the median frame has about 1,070 of 1,200 blocks matching.
-  - The low figures measured at first had two causes. The after-hook ran before the renderer's tail calls, so on a half-drawn screen. And the shift range was too small: between two camera angles the parallax shift reaches several pixels.
-  - The search now covers ±20 pixels, first in whole pixels and then in eighths, at about 4–5 ms per frame.
-  - A frame is used when 85% of its blocks match; unmatched blocks take the neighbour's shift.
-  - `KI_HD_PRERENDERED=0` turns this off.
-- **Next step.** Decode the shift from the renderer's parameters (the table at s7, k1 and v0 at 0x88030b40) instead of fitting it.
+- **Upscale.** The 8 frames are upscaled once.
+- **Recording.** Overrides of 0x88030b9c and 0x8803108c record each row's source: the frame pointer, or the decoded chunk indices plus the row as built.
+- **Reconstruction.** After the call, each block is rebuilt from the HD frames with the same model; half a pixel is exactly 2 HD pixels.
+- **Check.** A block whose model differs from the pixels drawn stays the game's (the animated fire, about 1–2%).
+- **Coverage.** In fights on stages 0, 1, 12 and 15, 98–99.5% of the blocks are HD, with a moving camera too. The earlier fitted shift reached 47–84%.
 
 **HD panoramas** (`tools/hd/panorama.py`, `panoramas.txt` in a pack).
 - **Upscale.** The layers are read from the stage file on disk, without billboards, and upscaled once with columns wrapped on both sides.

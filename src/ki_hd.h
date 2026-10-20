@@ -84,9 +84,23 @@ private:
         std::vector<bool> tried;
     };
     static void on_prerendered(Context& c);
+    static void on_prerendered_setup(Context& c);
+    static void on_prerendered_setup_before(Context& c);
+    // Per row of blocks of the current renderer call: where its pixels come from.
+    struct PreRow {
+        bool staged = false;          // from the 320x8 row built at 0x8002ce00 (else gp points into the frames)
+        uint32_t gp = 0;              // the row's source (staging or frame) as the loop uses it
+        uint32_t f2 = 0;              // staged: the address chunk indices are relative to
+        int chunk[160] = {};          // staged: source pixel (in the tall frames picture) of each 4x4 chunk
+        uint16_t original[320 * 8];   // staged: the row as built
+    };
+    std::vector<PreRow> pre_rows_;
+    uint32_t pre_f0_ = 0, pre_f1_ = 0, pre_f2_ = 0, pre_k0_row_ = 0;
+    int32_t pre_f4_ = 0;
     static void on_prerendered_after(Context& c);
     std::unordered_map<uint64_t, Prerendered> prerendered_;  // key: FNV of frame 0's first 8 rows
-    uint32_t pre_dest_ = 0;
+    uint32_t pre_dest_ = 0, pre_gp_ = 0, pre_s7_ = 0;
+    int pre_k_ = 0, pre_v0_ = 0;
     uint64_t pre_blocks_hd_ = 0, pre_blocks_kept_ = 0;
     static void on_screen_save(Context& c);
     static void on_screen_restore(Context& c);

@@ -37,6 +37,14 @@ void func_88030b9c(ki::Context& c) {
 
 namespace ki::gen {
 
+// Set-up step of the pre-rendered renderer (its source pointer is final after it).
+void func_8803108c(ki::Context& c) {
+    if (ki::hooks::prerendered_setup) ki::hooks::prerendered_setup(c);
+    func_8803108c_original(c);
+    ki::drain(c);
+    if (ki::hooks::prerendered_setup_after) ki::hooks::prerendered_setup_after(c);
+}
+
 // The end-of-fight screen (saved, darkened frame under the text).
 void func_88023008(ki::Context& c) {
     func_88023008_original(c);
