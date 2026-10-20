@@ -292,9 +292,43 @@ HdRenderer::Image* HdRenderer::recoloured(const Context& c, Image& base) {
     return &v;
 }
 
+void HdRenderer::upscale_pixel(Bank& b, const uint16_t* lo, int x, int y) {
+    // Bilinear 4x: subpixel u of pixel x samples x-1/x (u < 2) or x/x+1,
+    // with weights in eighths.
+    static const int kNear[4] = {-1, -1, 1, 1}, kWfar[4] = {3, 1, 1, 3};
+    int nb[3][3][3];  // [dy+1][dx+1][channel]
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            uint16_t p = lo[std::clamp(y + dy, 0, 239) * 320 + std::clamp(x + dx, 0, 319)];
+            nb[dy + 1][dx + 1][0] = (p & 31) << 3 | (p & 31) >> 2;
+            nb[dy + 1][dx + 1][1] = ((p >> 5) & 31) << 3 | ((p >> 5) & 31) >> 2;
+            nb[dy + 1][dx + 1][2] = ((p >> 10) & 31) << 3 | ((p >> 10) & 31) >> 2;
+        }
+    for (int v4 = 0; v4 < kScale; ++v4) {
+        int oy = kNear[v4], wy = kWfar[v4];
+        uint32_t* row = &b.hd[(y * kScale + v4) * kW + x * kScale];
+        for (int u4 = 0; u4 < kScale; ++u4) {
+            int ox = kNear[u4], wx = kWfar[u4];
+            int out[3];
+            for (int ch = 0; ch < 3; ++ch)
+                out[ch] = (nb[1][1][ch] * (8 - wx) * (8 - wy) + nb[1][1 + ox][ch] * wx * (8 - wy) +
+                           nb[1 + oy][1][ch] * (8 - wx) * wy + nb[1 + oy][1 + ox][ch] * wx * wy + 32) >> 6;
+            row[u4] = 0xff000000u | static_cast<uint32_t>(out[0]) << 16 | static_cast<uint32_t>(out[1]) << 8 |
+                      static_cast<uint32_t>(out[2]);
+        }
+    }
+    b.owned[y * 320 + x] = 0;
+}
+
 void HdRenderer::sync(const Context& c, uint32_t bank) {
     Bank& b = bank_of(bank);
     const uint16_t* lo = reinterpret_cast<const uint16_t*>(&c.sram[bank]);  // little-endian host
+    // A changed pixel's own block, and the blocks of its neighbours, which
+    // interpolate towards it (left stale they draw thin outlines where
+    // something moved); not neighbours an HD image owns.
+    std::vector<uint8_t>& todo = scratch_;
+    todo.assign(320 * 240, 0);
+    bool any = false;
     for (int y = 0; y < 240; ++y) {
         if (!std::memcmp(lo + y * 320, &b.shadow[y * 320], 640)) continue;  // most rows are unchanged
         for (int x = 0; x < 320; ++x) {
@@ -302,34 +336,20 @@ void HdRenderer::sync(const Context& c, uint32_t bank) {
             uint16_t& s = b.shadow[y * 320 + x];
             if (v == s) continue;
             s = v;
-            // Bilinear 4x: subpixel u of pixel x samples x-1/x (u < 2) or x/x+1,
-            // with weights in eighths.
-            static const int kNear[4] = {-1, -1, 1, 1}, kWfar[4] = {3, 1, 1, 3};
-            int nb[3][3][3];  // [dy+1][dx+1][channel]
+            any = true;
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dx = -1; dx <= 1; ++dx) {
-                    uint16_t p = lo[std::clamp(y + dy, 0, 239) * 320 + std::clamp(x + dx, 0, 319)];
-                    nb[dy + 1][dx + 1][0] = (p & 31) << 3 | (p & 31) >> 2;
-                    nb[dy + 1][dx + 1][1] = ((p >> 5) & 31) << 3 | ((p >> 5) & 31) >> 2;
-                    nb[dy + 1][dx + 1][2] = ((p >> 10) & 31) << 3 | ((p >> 10) & 31) >> 2;
+                    int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= 320 || ny >= 240) continue;
+                    if ((dx || dy) && b.owned[ny * 320 + nx]) continue;
+                    todo[ny * 320 + nx] = 1;
                 }
-            for (int v4 = 0; v4 < kScale; ++v4) {
-                int oy = kNear[v4], wy = kWfar[v4];
-                uint32_t* row = &b.hd[(y * kScale + v4) * kW + x * kScale];
-                for (int u4 = 0; u4 < kScale; ++u4) {
-                    int ox = kNear[u4], wx = kWfar[u4];
-                    int c00[3], out[3];
-                    for (int ch = 0; ch < 3; ++ch) {
-                        c00[ch] = nb[1][1][ch] * (8 - wx) * (8 - wy) + nb[1][1 + ox][ch] * wx * (8 - wy) +
-                                  nb[1 + oy][1][ch] * (8 - wx) * wy + nb[1 + oy][1 + ox][ch] * wx * wy;
-                        out[ch] = (c00[ch] + 32) >> 6;
-                    }
-                    row[u4] = 0xff000000u | static_cast<uint32_t>(out[0]) << 16 | static_cast<uint32_t>(out[1]) << 8 |
-                              static_cast<uint32_t>(out[2]);
-                }
-            }
         }
     }
+    if (!any) return;
+    for (int y = 0; y < 240; ++y)
+        for (int x = 0; x < 320; ++x)
+            if (todo[y * 320 + x]) upscale_pixel(b, lo, x, y);
 }
 
 void HdRenderer::invalidate(const Context& c, uint32_t bank) {
@@ -390,9 +410,13 @@ void HdRenderer::draw(Bank& b, const Image& im, int x0, int y0, int x1, int y1, 
 void HdRenderer::on_before(Context& c) {
     HdRenderer& r = *g_hd;
     r.bank_ = (c.dram[0x86200] & 1) ? 0x58000 : 0x30000;  // the blitter's target (0x88010900)
-    if (r.bank_ != r.last_bank_) {  // the first sprite of a new frame in this bank
+    // The first sprite of a new frame in this bank (also when the game keeps
+    // drawing into the same one, as on the title screen): what HD images
+    // covered before is upscaled again from the game's pixels.
+    if (r.bank_ != r.last_bank_ || r.epoch_ != r.last_epoch_) {
         r.invalidate(c, r.bank_);
         r.last_bank_ = r.bank_;
+        r.last_epoch_ = r.epoch_;
     }
     r.sync(c, r.bank_);
     // The other one too: the footprint is then looked for in both, as on some
@@ -479,8 +503,10 @@ void HdRenderer::on_after(Context& c) {
     // The pixels the call drew are taken as synced without being upscaled:
     // under the HD image, and around its soft edge, stays what was there
     // before the sprite, not the original sprite enlarged.
-    for (int y = fy0; y <= fy1; ++y)
+    for (int y = fy0; y <= fy1; ++y) {
         std::memcpy(&b.shadow[y * 320 + fx0], lo + y * 320 + fx0, (fx1 - fx0 + 1) * 2);
+        std::memset(&b.owned[y * 320 + fx0], 1, fx1 - fx0 + 1);
+    }
     r.draw(b, im, x0, y0, x1, y1, mirror);
     ++r.hd_drawn_;
     if (const char* snap = std::getenv("KI_HD_SNAP")) {  // debug: the HD copy right after this header's draw
@@ -602,6 +628,7 @@ void HdRenderer::on_panorama_after(Context& c) {
             }
             ++r.pano_hd_;
             b.shadow[y * 320 + x] = v;
+            b.owned[y * 320 + x] = 1;
             for (int sy = 0; sy < kScale; ++sy)
                 std::memcpy(&b.hd[static_cast<size_t>(y * kScale + sy) * kW + x * kScale],
                             &p.hd[static_cast<size_t>(row * kScale + sy) * p.w * kScale + col * kScale], kScale * 4);
@@ -641,6 +668,19 @@ void HdRenderer::on_prerendered_after(Context& c) {
     Prerendered& st = it->second;
     if (frames0 + static_cast<uint64_t>(st.frames) * kFrame * 2 > c.dram.size()) return;
     const uint16_t* fb = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
+    if (const char* d = std::getenv("KI_PRE_DUMP")) {  // debug: the screen as the renderer left it, call N
+        static int calls = 0;
+        if (++calls == std::atoi(d)) {
+            if (FILE* f = std::fopen("pre_fb.bin", "wb")) {
+                std::fwrite(fb, 2, 320 * 240, f);
+                std::fclose(f);
+            }
+            if (FILE* f = std::fopen("pre_frames.bin", "wb")) {
+                std::fwrite(&c.dram[frames0], 2, static_cast<size_t>(st.frames) * kFrame, f);
+                std::fclose(f);
+            }
+        }
+    }
     auto src = [&](int f) { return reinterpret_cast<const uint16_t*>(&c.dram[frames0 + static_cast<uint32_t>(f) * kFrame * 2]); };
     // Error of block (bx, by) drawn from frame f shifted by s/8 pixel (the
     // renderer mixes two neighbouring columns in eighths).
@@ -740,12 +780,15 @@ void HdRenderer::on_prerendered_after(Context& c) {
                     out[x] = p0;
                 }
             }
-            for (int y = by * 8; y < by * 8 + 8; ++y)
+            for (int y = by * 8; y < by * 8 + 8; ++y) {
                 std::memcpy(&b.shadow[y * 320 + bx * 8], fb + y * 320 + bx * 8, 16);
+                std::memset(&b.owned[y * 320 + bx * 8], 1, 8);
+            }
         }
 }
 
 const std::vector<uint32_t>& HdRenderer::frame(const Context& c, uint32_t bank) {
+    ++epoch_;
     sync(c, bank);
     return bank_of(bank).hd;
 }

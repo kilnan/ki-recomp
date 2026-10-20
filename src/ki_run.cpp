@@ -196,6 +196,10 @@ int main(int argc, char** argv) {
             uint32_t& port = e.port == 1 ? board.p1 : board.p2;
             port = e.value ? (port & ~e.bit) : (port | e.bit);
         }
+#ifdef KI_HAVE_HD
+        // As ki_play does, the shown picture every frame (keeps the HD state the same).
+        if (!hd_pack.empty() && frame % dump_every != 0 && frame < frames) hd.frame(ctx, board.displayed_bank());
+#endif
         if (frame % dump_every == 0 || frame >= frames) {
             char name[64];
             std::snprintf(name, sizeof name, "/frame_%05llu.ppm", static_cast<unsigned long long>(frame));

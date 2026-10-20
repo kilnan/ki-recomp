@@ -61,7 +61,10 @@ private:
         // Where HD images were drawn: the HD copy there no longer matches the
         // shadow, so it is upscaled again when the game next draws this bank.
         std::vector<Rect> hd_rects;
+        std::vector<uint8_t> owned = std::vector<uint8_t>(320 * 240, 0);  // pixel shows an HD image, not its upscale
     };
+    void upscale_pixel(Bank& b, const uint16_t* lo, int x, int y);
+    std::vector<uint8_t> scratch_;
     void invalidate(const Context& c, uint32_t bank);
     // A stage panorama (panoramas.txt): its original pixels (to tell where the
     // game drew over its copy) and the HD picture, (w * 4) x (h * 4).
@@ -108,6 +111,7 @@ private:
     // the current blitter call
     uint64_t key_ = 0, shape_ = 0;
     uint32_t bank_ = 0, last_bank_ = ~0u;
+    uint64_t epoch_ = 0, last_epoch_ = 0;  // frames shown (frame() calls)
     int32_t s7_ = 0, t8_ = 0, t1_ = 4096, t3_ = 4096, t4_ = 2, mode_ = 0, a0_ = 0;
     unsigned hd_drawn_ = 0;
     uint64_t pano_hd_ = 0, pano_kept_ = 0;
