@@ -299,7 +299,7 @@ int main(int argc, char** argv) {
             hd_on = true;
             hd_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
                                            ki::HdRenderer::kW, ki::HdRenderer::kH);
-            std::fprintf(stderr, "HD pack: %zu sprites (H switches HD on and off)\n", hd.pack_size());
+            std::fprintf(stderr, "HD pack: %zu sprites, %zu shapes (H switches HD on and off)\n", hd.pack_size(), hd.shape_count());
         } else {
             std::fprintf(stderr, "no HD pack in %s\n", hd_pack.c_str());
         }
@@ -319,33 +319,67 @@ int main(int argc, char** argv) {
         }
     };
     auto next_frame = std::chrono::steady_clock::now();
+    bool paused = false;
+    auto present = [&](ki::Context& ctx) {
+        SDL_RenderClear(renderer);
+#ifdef KI_HAVE_HD
+        // The HD copy is kept up to date even when not shown, so H switches instantly.
+        if (hd_texture) {
+            const std::vector<uint32_t>& px = hd.frame(ctx, board.displayed_bank());
+            if (hd_on) {
+                SDL_UpdateTexture(hd_texture, nullptr, px.data(), ki::HdRenderer::kW * 4);
+                SDL_RenderCopy(renderer, hd_texture, nullptr, nullptr);
+            }
+        }
+        if (!hd_on)
+#endif
+        {
+            auto rgb = board.framebuffer_rgb(ctx);
+            SDL_UpdateTexture(texture, nullptr, rgb.data(), 320 * 3);
+            SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+        }
+        SDL_RenderPresent(renderer);
+    };
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
         SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT || (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) {
-                save();
-                SDL_Quit();
-                std::exit(0);
+        for (bool first = true; first || paused; first = false) {
+            if (!first) {
+                // Paused: the frame stays on screen (H still switches HD, to compare), the game does not run.
+                present(ctx);
+                SDL_Delay(16);
+                next_frame = std::chrono::steady_clock::now();
             }
-            if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_TAB && !ev.key.repeat) turbo = !turbo;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT || (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) {
+                    save();
+                    SDL_Quit();
+                    std::exit(0);
+                }
+                if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_TAB && !ev.key.repeat) turbo = !turbo;
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_P) {
+                    paused = !paused;
+                    if (audio) SDL_PauseAudioDevice(audio, paused ? 1 : 0);
+                    SDL_SetWindowTitle(window, paused ? "Killer Instinct (recompiled): paused (P resumes)" : kTitle);
+                }
 #ifdef KI_HAVE_HD
-            if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_H && hd_texture)
-                hd_on = !hd_on;
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_H && hd_texture)
+                    hd_on = !hd_on;
 #endif
-            if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F5)
-                state.request(ctx);  // taken at the next dispatcher entry
-            if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F9 && state.valid())
-                throw ki::LoadStateRequest{};
-            if (ev.type == SDL_CONTROLLERDEVICEADDED) {
-                if (SDL_GameController* pad = SDL_GameControllerOpen(ev.cdevice.which)) pads.push_back(pad);
-            }
-            if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-                for (SDL_GameController*& pad : pads)
-                    if (pad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad)) == ev.cdevice.which) {
-                        SDL_GameControllerClose(pad);
-                        pad = nullptr;
-                    }
-                pads.erase(std::remove(pads.begin(), pads.end(), nullptr), pads.end());
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F5)
+                    state.request(ctx);  // taken at the next dispatcher entry
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F9 && state.valid())
+                    throw ki::LoadStateRequest{};
+                if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                    if (SDL_GameController* pad = SDL_GameControllerOpen(ev.cdevice.which)) pads.push_back(pad);
+                }
+                if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                    for (SDL_GameController*& pad : pads)
+                        if (pad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad)) == ev.cdevice.which) {
+                            SDL_GameControllerClose(pad);
+                            pad = nullptr;
+                        }
+                    pads.erase(std::remove(pads.begin(), pads.end(), nullptr), pads.end());
+                }
             }
         }
         if (frame % 600 == 0) save();  // every ~10 s, if the game wrote anything
@@ -374,26 +408,7 @@ int main(int argc, char** argv) {
                 SDL_QueueAudio(audio, pcm.data(), static_cast<Uint32>(pcm.size() * sizeof(int16_t)));
             pcm.clear();
         }
-        if (!turbo || frame % 8 == 0) {
-            SDL_RenderClear(renderer);
-#ifdef KI_HAVE_HD
-            // The HD copy is kept up to date even when not shown, so H switches instantly.
-            if (hd_texture) {
-                const std::vector<uint32_t>& px = hd.frame(ctx, board.displayed_bank());
-                if (hd_on) {
-                    SDL_UpdateTexture(hd_texture, nullptr, px.data(), ki::HdRenderer::kW * 4);
-                    SDL_RenderCopy(renderer, hd_texture, nullptr, nullptr);
-                }
-            }
-            if (!hd_on)
-#endif
-            {
-                auto rgb = board.framebuffer_rgb(ctx);
-                SDL_UpdateTexture(texture, nullptr, rgb.data(), 320 * 3);
-                SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-            }
-            SDL_RenderPresent(renderer);
-        }
+        if (!turbo || frame % 8 == 0) present(ctx);
         if (!turbo) {
             next_frame += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double>(kFrameSeconds));

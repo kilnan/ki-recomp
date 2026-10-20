@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -338,14 +339,29 @@ int main(int argc, char** argv) {
         std::sscanf(probe, "%x-%x:%llu", &lo, &hi, &f);
         probe_frame = f;
         static std::map<uint64_t, std::pair<unsigned, unsigned>> pages;  // page -> loads, stores
+        static std::set<uint64_t> active_frames;
         ki::g_mem_probe = [](ki::Context& ctx, uint32_t va, int, uint32_t pc, bool store) {
             if (pc - lo >= hi - lo || (probe_frame && board_frame != probe_frame)) return;
+            static uint32_t va_lo = 0, va_hi = 0;  // KI_MEM_PROBE_VA=LO-HI: only these addresses
+            static const bool va_set = [] {
+                if (const char* v = std::getenv("KI_MEM_PROBE_VA")) return std::sscanf(v, "%x-%x", &va_lo, &va_hi) == 2;
+                return false;
+            }();
+            if (va_set && va - va_lo >= va_hi - va_lo) return;
             static const bool by_pc = std::getenv("KI_MEM_PROBE_BY_PC") != nullptr;  // key: code page instead
             auto& e = pages[by_pc ? pc >> 6 : va >> 10];
+            active_frames.insert(board_frame);
             (store ? e.second : e.first)++;
             (void)ctx;
         };
         std::atexit([] {
+            std::fprintf(stderr, "probe frames:");  // as ranges
+            for (auto it = active_frames.begin(); it != active_frames.end();) {
+                uint64_t a = *it, b = a;
+                while (++it != active_frames.end() && *it == b + 1) ++b;
+                std::fprintf(stderr, " %llu-%llu", static_cast<unsigned long long>(a), static_cast<unsigned long long>(b));
+            }
+            std::fprintf(stderr, "\n");
             for (const auto& [page, n] : pages)
                 std::fprintf(stderr, "probe %08llx loads %u stores %u\n",
                              static_cast<unsigned long long>(page << (std::getenv("KI_MEM_PROBE_BY_PC") ? 6 : 10)), n.first,

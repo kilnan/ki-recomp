@@ -226,6 +226,7 @@ and checks that it loads only its own libraries.
 
 | key | action |
 |---|---|
+| P | pause (H still works, to compare) |
 | H | HD sprites on/off (with `--hd-pack DIR`) |
 | F5 | save the state (taken at the next frame) |
 | F9 | load the saved state |

@@ -17,6 +17,7 @@ of one colour that is the exact palette swap; the detail the upscaler added
 is kept.
 """
 import os
+import shutil
 import struct
 import sys
 import zlib
@@ -71,6 +72,7 @@ def main() -> int:
         if big.size != (bucket * scale, bucket * scale):
             big = big.resize((bucket * scale, bucket * scale), Image.LANCZOS)
         upscaled[name] = np.asarray(big.crop((x * scale, y * scale, (x + w) * scale, (y + h) * scale)))
+    real = set(upscaled)  # upscaled themselves, not recoloured
     if "--recolor" in sys.argv:
         recolor(ext, layout, upscaled, scale)
     for name, rgb in upscaled.items():
@@ -87,10 +89,21 @@ def main() -> int:
         written += 1
     keys = [l.split() for l in open(f"{ext}/keys.txt")]
     with open(f"{pack}/index.txt", "w") as f:
-        for key, image, ox, oy, w, h in keys:
+        for key, image, ox, oy, w, h, *_ in keys:
             if os.path.exists(f"{pack}/{image}.ki4"):
                 f.write(f"{key} {image} {ox} {oy} {w} {h}\n")
-    print(f"{written} images, {sum(1 for _ in open(f'{pack}/index.txt'))} keys in {pack}")
+    # shapes.txt: for a sprite drawn with a palette the pack has no image for,
+    # the player recolours the HD image of the same shape (with its .kix:
+    # palette and the palette entry of each original pixel).
+    shapes = {}
+    for key, image, ox, oy, w, h, *rest in keys:
+        if rest and image in real and os.path.exists(f"{ext}/{image}.kix") and rest[0] not in shapes:
+            shapes[rest[0]] = (image, ox, oy, w, h)
+            shutil.copyfile(f"{ext}/{image}.kix", f"{pack}/{image}.kix")
+    with open(f"{pack}/shapes.txt", "w") as f:
+        for shape, (image, ox, oy, w, h) in shapes.items():
+            f.write(f"{shape} {image} {ox} {oy} {w} {h}\n")
+    print(f"{written} images, {sum(1 for _ in open(f'{pack}/index.txt'))} keys, {len(shapes)} shapes in {pack}")
     return 0
 
 

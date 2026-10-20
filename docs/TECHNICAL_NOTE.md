@@ -758,6 +758,8 @@ there too; with 256 bytes there are 476 keys.
   - `--extract-character BASE:SIZE:7,8,9,10,11,12` draws them with each listed palette, and `index.txt` records it (`pal n`). For Combo that gives 515 images per costume.
 - **Costumes in the HD pack.** `pack.py --recolor` takes, for a sprite drawn with another palette and not upscaled itself, the upscaled image of the same header. It adds the difference between the two originals, upscaled bicubically: inside an area of one colour this is the exact palette swap, and the added detail is kept. So one upscale per pose covers the six costumes.
 
+**Any palette at run time.** Extraction also draws each indexed (mode 0) sprite with palette entry n = n. The pixels are then the entries used, written with the palette to `<image>.kix`. The pack's `shapes.txt` maps the shape key (header and data, without the palette) to an upscaled image. When a draw's exact key is not in the pack (a flash, lighting, a costume not in the pack), the player adds the per-entry colour difference to the HD image, upscaled bilinearly from the entry map, and caches the result per palette.
+
 **HD rendering** (`src/ki_hd.cpp`; `ki_play --hd-pack DIR`, H toggles,
 `ki_run --hd-pack DIR` writes `hd_frame_N.ppm`).
 - **Copies.** For each framebuffer a 4x copy and a shadow of the original
@@ -766,7 +768,9 @@ there too; with 256 bytes there are 476 keys.
   upscaled bilinearly into the copy (stages, shadows, effects, HUD parts
   without HD).
 - **After the call**, if the sprite is in the pack, its HD image is drawn over
-  the area the call changed. That footprint is searched around the predicted
+  the area the call changed. The pixels the call drew are taken as synced without
+  being upscaled, so what shows around the HD image's soft edge is the background,
+  not the original sprite enlarged (that left a pixelated fringe). That footprint is searched around the predicted
   rectangle. When unclipped, the footprint itself is used, so no rounding has
   to be guessed.
 - **At VBLANK** the displayed copy is synced and shown.

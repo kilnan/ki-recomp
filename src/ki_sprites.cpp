@@ -185,8 +185,9 @@ void extract(Context& c, uint64_t key) {
     // Positions are in 1/256 pixel. Draw at the centre, then move the sprite
     // so that its bounding box starts at (8, 8).
     int32_t x = 160 * 256, y = 120 * 256, drawn_x = x, drawn_y = y;
-    std::vector<uint16_t> a, b;
+    std::vector<uint16_t> a, b, indices;
     Bbox bb;
+    const bool indexed = lo32(saved.r[22]) == 0;  // mode 0: pixels are palette entries
     try {
         for (int pass = 0; pass < 2; ++pass) {
             drawn_x = x, drawn_y = y;
@@ -197,6 +198,11 @@ void extract(Context& c, uint64_t key) {
             if (bb.x0 == 8 && bb.y0 == 8) break;
             x += (8 - bb.x0) * 256;
             y += (8 - bb.y0) * 256;
+        }
+        if (indexed && bb.x1 >= 0) {
+            // Once more with palette entry n = n: the pixels are then the entries used.
+            for (int n = 0; n < 128; ++n) c.dram[0x90000 + 2 * n] = static_cast<uint8_t>(n), c.dram[0x90001 + 2 * n] = 0;
+            indices = draw_alone(c, args, 0x0000, drawn_x, drawn_y);
         }
     } catch (const GuestFault& f) {
         std::fprintf(stderr, "sprite %08x: redraw faulted at %08x, skipped\n", h, f.pc);
@@ -222,11 +228,31 @@ void extract(Context& c, uint64_t key) {
     // Where the image sits relative to the anchor (s7, t8) at scale 1, in pixels.
     int ox = bb.x0 - drawn_x / 256, oy = bb.y0 - drawn_y / 256;
     if (FILE* f = std::fopen((g_dir + "/keys.txt").c_str(), "a")) {
-        std::fprintf(f, "%016llx %016llx %d %d %d %d\n", static_cast<unsigned long long>(key),
-                     static_cast<unsigned long long>(image), ox, oy, w, ht);
+        std::fprintf(f, "%016llx %016llx %d %d %d %d %016llx\n", static_cast<unsigned long long>(key),
+                     static_cast<unsigned long long>(image), ox, oy, w, ht,
+                     static_cast<unsigned long long>(sprite_shape_key(saved)));
         std::fclose(f);
     }
     if (!g_seen_images.insert(image).second) return;
+    if (!indices.empty()) {
+        // <image>.kix: "KIIX", u32 w, u32 h, the palette (256 bytes, as in the zero page),
+        // then w*h palette entries (0xff: transparent). Lets the player recolour the HD image.
+        char kix[64];
+        std::snprintf(kix, sizeof kix, "/%016llx.kix", static_cast<unsigned long long>(image));
+        if (FILE* f = std::fopen((g_dir + kix).c_str(), "wb")) {
+            uint32_t dims[2] = {static_cast<uint32_t>(w), static_cast<uint32_t>(ht)};
+            std::fwrite("KIIX", 1, 4, f);
+            std::fwrite(dims, 4, 2, f);
+            std::fwrite(&saved.dram[0x90000], 1, 0x100, f);
+            for (int yy = 0; yy < ht; ++yy)
+                for (int xx = 0; xx < w; ++xx) {
+                    int i = (bb.y0 + yy) * 320 + bb.x0 + xx;
+                    uint8_t e = a[i] == b[i] ? static_cast<uint8_t>(indices[i] & 0x7f) : 0xff;
+                    std::fputc(e, f);
+                }
+            std::fclose(f);
+        }
+    }
     char name[64];
     std::snprintf(name, sizeof name, "/%016llx.ppm", static_cast<unsigned long long>(image));
     if (FILE* f = std::fopen((g_dir + name).c_str(), "wb")) {
@@ -252,6 +278,12 @@ uint64_t sprite_key(const Context& c) {
     // addresses of halfwords (0x88010f50: lbu; lh 0(reg)), so the palette is the
     // zero page's first 256 bytes; the rest of the page holds other variables.
     return fnv(&c.dram[0x90000], 0x100, fnv(&c.dram[h - 0x88000000u], 512));
+}
+
+uint64_t sprite_shape_key(const Context& c) {
+    uint32_t h = lo32(c.r[3]);
+    if (h - 0x88000000u >= c.dram.size() - 1024) return 0;
+    return fnv(&c.dram[h - 0x88000000u], 512);
 }
 
 void start_sprite_extraction(const std::string& dir) {

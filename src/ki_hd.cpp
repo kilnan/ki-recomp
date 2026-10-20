@@ -45,6 +45,16 @@ bool HdRenderer::load_pack(const std::string& dir) {
         im.file = dir + "/" + image + ".ki4";
         pack_[std::stoull(key, nullptr, 16)] = im;
     }
+    std::ifstream sh(dir + "/shapes.txt");
+    while (std::getline(sh, line)) {
+        std::istringstream ls(line);
+        std::string key, image;
+        Image im;
+        if (!(ls >> key >> image >> im.ox >> im.oy >> im.w >> im.h)) continue;
+        im.file = dir + "/" + image + ".ki4";
+        im.kix_file = dir + "/" + image + ".kix";
+        shapes_[std::stoull(key, nullptr, 16)] = im;
+    }
     return !pack_.empty();
 }
 
@@ -81,6 +91,84 @@ bool HdRenderer::load(Image& im) {
         return false;
     }
     return true;
+}
+
+bool HdRenderer::load_kix(Image& im) {
+    im.kix_loaded = true;
+    std::ifstream f(im.kix_file, std::ios::binary);
+    char magic[4];
+    uint32_t dims[2];
+    if (!f.read(magic, 4) || std::memcmp(magic, "KIIX", 4) || !f.read(reinterpret_cast<char*>(dims), sizeof dims))
+        return false;
+    im.palette.resize(0x100);
+    im.entries.resize(static_cast<size_t>(dims[0]) * dims[1]);
+    if (!f.read(reinterpret_cast<char*>(im.palette.data()), 0x100) ||
+        !f.read(reinterpret_cast<char*>(im.entries.data()), static_cast<std::streamsize>(im.entries.size())) ||
+        static_cast<int>(dims[0]) != im.w || static_cast<int>(dims[1]) != im.h) {
+        im.entries.clear();
+        return false;
+    }
+    return true;
+}
+
+HdRenderer::Image* HdRenderer::recoloured(const Context& c, Image& base) {
+    if (!base.loaded) load(base);
+    if (!base.kix_loaded) load_kix(base);
+    if (base.missing || base.entries.empty()) return nullptr;
+    const uint8_t* pal = &c.dram[0x90000];
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i < 0x100; ++i) h = (h ^ pal[i]) * 1099511628211ull;
+    h ^= std::hash<std::string>{}(base.file);
+    auto it = variants_.find(h);
+    if (it != variants_.end()) return &it->second;
+    // Per palette entry, the colour difference between now and the original;
+    // over the image, upscaled bilinearly and added to the HD colours. Inside
+    // an area of one entry this is the exact new colour; the detail stays.
+    auto rgb = [](const uint8_t* p, int n, int ch) {
+        uint16_t v = static_cast<uint16_t>(p[2 * n] | p[2 * n + 1] << 8);
+        int c5 = (v >> (5 * ch)) & 31;
+        return (c5 << 3) | (c5 >> 2);
+    };
+    int delta[128][3];
+    bool same = true;
+    for (int n = 0; n < 128; ++n)
+        for (int ch = 0; ch < 3; ++ch) {
+            delta[n][ch] = rgb(pal, n, ch) - rgb(base.palette.data(), n, ch);
+            same = same && delta[n][ch] == 0;
+        }
+    Image& v = variants_[h];
+    v = base;
+    v.entries.clear();
+    v.palette.clear();
+    if (same) return &v;
+    const int w = base.w, ht = base.h;
+    auto d_at = [&](int x, int y, int ch) {
+        x = std::clamp(x, 0, w - 1), y = std::clamp(y, 0, ht - 1);
+        uint8_t e = base.entries[static_cast<size_t>(y) * w + x];
+        return e == 0xff ? 0 : delta[e & 0x7f][ch];
+    };
+    for (int y = 0; y < v.ih; ++y) {
+        float fy = (y + 0.5f) * ht / v.ih - 0.5f;
+        int y0 = static_cast<int>(std::floor(fy));
+        float wy = fy - y0;
+        for (int x = 0; x < v.iw; ++x) {
+            uint32_t& px = v.argb[static_cast<size_t>(y) * v.iw + x];
+            if (!(px >> 24)) continue;
+            float fx = (x + 0.5f) * w / v.iw - 0.5f;
+            int x0 = static_cast<int>(std::floor(fx));
+            float wx = fx - x0;
+            uint32_t out = px & 0xff000000u;
+            for (int ch = 0; ch < 3; ++ch) {
+                float d = (d_at(x0, y0, ch) * (1 - wx) + d_at(x0 + 1, y0, ch) * wx) * (1 - wy) +
+                          (d_at(x0, y0 + 1, ch) * (1 - wx) + d_at(x0 + 1, y0 + 1, ch) * wx) * wy;
+                int shift = 16 - 8 * ch;  // BGR555 bits 0-4 are red (ARGB bits 16-23), as argb_of
+                int val = static_cast<int>((px >> shift) & 255) + static_cast<int>(std::lround(d));
+                out |= static_cast<uint32_t>(std::clamp(val, 0, 255)) << shift;
+            }
+            px = out;
+        }
+    }
+    return &v;
 }
 
 void HdRenderer::sync(const Context& c, uint32_t bank) {
@@ -156,6 +244,7 @@ void HdRenderer::on_before(Context& c) {
     r.bank_ = (c.dram[0x86200] & 1) ? 0x58000 : 0x30000;  // the blitter's target (0x88010900)
     r.sync(c, r.bank_);
     r.key_ = sprite_key(c);
+    r.shape_ = sprite_shape_key(c);
     r.header_ = lo32(c.r[3]);
     r.s7_ = static_cast<int32_t>(lo32(c.r[23]));
     r.t8_ = static_cast<int32_t>(lo32(c.r[24]));
@@ -167,12 +256,20 @@ void HdRenderer::on_before(Context& c) {
 
 void HdRenderer::on_after(Context& c) {
     HdRenderer& r = *g_hd;
+    if (r.mode_ == 48) return;  // shadows are drawn normally; picked up by the next sync
     auto it = r.pack_.find(r.key_);
-    if (it == r.pack_.end() || r.mode_ == 48) {  // drawn normally; picked up by the next sync
+    Image* found = nullptr;
+    if (it != r.pack_.end()) {
+        found = &it->second;
+    } else if (r.mode_ == 0) {  // another palette (costume, flash, lighting): recolour the shape's image
+        auto sh = r.shapes_.find(r.shape_);
+        if (sh != r.shapes_.end()) found = r.recoloured(c, sh->second);
+    }
+    if (!found) {
         ++r.misses_[static_cast<uint64_t>(r.header_) << 32 | static_cast<uint32_t>(r.mode_)];
         return;
     }
-    Image& im = it->second;
+    Image& im = *found;
     if (!im.loaded) r.load(im);
     if (im.missing) return;
     // Where the whole sprite goes (it may be clipped): see TECHNICAL_NOTE "Sprite blitter".
@@ -197,9 +294,11 @@ void HdRenderer::on_after(Context& c) {
     bool clipped = fx0 == 0 || fy0 == 0 || fx1 == 319 || fy1 == 239;
     if (!clipped && std::abs((fx1 - fx0) - (x1 - x0)) <= 2 && std::abs((fy1 - fy0) - (y1 - y0)) <= 2)
         x0 = fx0, y0 = fy0, x1 = fx1, y1 = fy1;
-    // The original pixels under the footprint are first upscaled (for any
-    // semi-transparent edge of the HD image), then covered.
-    r.sync(c, r.bank_);
+    // The pixels the call drew are taken as synced without being upscaled:
+    // under the HD image, and around its soft edge, stays what was there
+    // before the sprite, not the original sprite enlarged.
+    for (int y = fy0; y <= fy1; ++y)
+        std::memcpy(&b.shadow[y * 320 + fx0], lo + y * 320 + fx0, (fx1 - fx0 + 1) * 2);
     r.draw(b, im, x0, y0, x1, y1, mirror);
     ++r.hd_drawn_;
 }

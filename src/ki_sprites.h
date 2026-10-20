@@ -27,5 +27,7 @@ unsigned extracted_sprites();
 // Identity of the sprite of the current blitter call: its header and data
 // (first 512 bytes) and the palette (zero page, first 256 bytes). HD packs are keyed by it.
 uint64_t sprite_key(const Context& c);
+// The same without the palette: the sprite's shape, in any colours.
+uint64_t sprite_shape_key(const Context& c);
 
 }  // namespace ki
