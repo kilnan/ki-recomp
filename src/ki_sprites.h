@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "ki/runtime.h"
 
@@ -17,8 +18,9 @@ namespace ki {
 void start_sprite_extraction(const std::string& dir);
 void stop_sprite_extraction();
 // Also extract every sprite of the character data at DRAM [base, base+size),
-// at the first normal draw of one of them (its palette and mode).
-void extract_character(uint32_t base, uint32_t size);
+// at the first normal draw of one of them (its mode), with each of `palettes`
+// (palette numbers, see 0x88001ffc) or, if empty, with that call's palette.
+void extract_character(uint32_t base, uint32_t size, const std::vector<int>& palettes = {});
 // Number of distinct sprites written so far.
 unsigned extracted_sprites();
 

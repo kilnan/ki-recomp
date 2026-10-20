@@ -100,8 +100,10 @@ void probe_geometry(Context& c) {
 // is an empty frame; zero words pad between some animations.
 struct Catalog {
     uint32_t base = 0, size = 0;
+    std::vector<int> palettes;  // palette numbers (0x88090100 + 256·n), or the call's own
     bool done = false;
 } g_catalog;
+int g_palette = -1;  // the palette number being extracted, for index.txt (-1: the game's)
 
 void extract(Context& c, uint64_t key);
 
@@ -115,29 +117,38 @@ void extract_catalog(Context& c) {
     const uint32_t base = g_catalog.base - 0x88000000u, end = base + g_catalog.size;
     FILE* anim = std::fopen((g_dir + "/animations.txt").c_str(), "a");
     unsigned anims = 0, frames = 0;
-    for (uint32_t off = base; off + 8 <= end;) {
-        uint32_t id = u16(off), count = u16(off + 2), size = u32(off + 4);
-        if (size == 0 && id == 0 && count == 0) {
-            off += 4;
-            continue;
+    std::vector<int> palettes = g_catalog.palettes;
+    if (palettes.empty()) palettes.push_back(-1);
+    for (int pal : palettes) {
+        g_palette = pal;
+        if (pal >= 0)  // as 0x88001ffc does before a draw
+            std::memcpy(&c.dram[0x90000], &c.dram[0x90100 + 0x100 * pal], 0x100);
+        for (uint32_t off = base; off + 8 <= end;) {
+            uint32_t id = u16(off), count = u16(off + 2), size = u32(off + 4);
+            if (size == 0 && id == 0 && count == 0) {
+                off += 4;
+                continue;
+            }
+            if (size < 8 + 4 * count || off + size > end) {
+                std::fprintf(stderr, "character data: not an animation at %08x, stopped\n", 0x88000000u + off);
+                break;
+            }
+            ++anims;
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t o = u32(off + 8 + 4 * i);
+                if (anim && pal == palettes[0])
+                    std::fprintf(anim, "%04x %2u %08x\n", id, i, o < size ? 0x88000000u + off + o : 0);
+                if (o >= size) continue;
+                ++frames;
+                c.r[3] = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(0x88000000u + off + o)));
+                uint64_t key = sprite_key(c);
+                if (g_seen_keys.insert(key).second) extract(c, key);
+            }
+            off += size;
         }
-        if (size < 8 + 4 * count || off + size > end) {
-            std::fprintf(stderr, "character data: not an animation at %08x, stopped\n", 0x88000000u + off);
-            break;
-        }
-        ++anims;
-        for (uint32_t i = 0; i < count; ++i) {
-            uint32_t o = u32(off + 8 + 4 * i);
-            if (anim) std::fprintf(anim, "%04x %2u %08x\n", id, i, o < size ? 0x88000000u + off + o : 0);
-            if (o >= size) continue;
-            ++frames;
-            c.r[3] = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(0x88000000u + off + o)));
-            uint64_t key = sprite_key(c);
-            if (g_seen_keys.insert(key).second) extract(c, key);
-        }
-        off += size;
     }
     if (anim) std::fclose(anim);
+    g_palette = -1;
     c = saved;
     std::fprintf(stderr, "character data %08x: %u animations, %u frames, %u images written so far\n",
                  g_catalog.base, anims, frames, g_written);
@@ -224,9 +235,9 @@ void extract(Context& c, uint64_t key) {
         std::fclose(f);
     }
     if (FILE* f = std::fopen((g_dir + "/index.txt").c_str(), "a")) {
-        std::fprintf(f, "%016llx header %08x size %dx%d hdr %d %d %d %d\n", static_cast<unsigned long long>(image), h,
-                     w, ht, static_cast<int16_t>(hdr[0] | hdr[1] << 8), static_cast<int16_t>(hdr[2] | hdr[3] << 8),
-                     static_cast<int16_t>(hdr[4] | hdr[5] << 8), static_cast<int16_t>(hdr[6] | hdr[7] << 8));
+        std::fprintf(f, "%016llx header %08x size %dx%d hdr %d %d %d %d pal %d\n", static_cast<unsigned long long>(image),
+                     h, w, ht, static_cast<int16_t>(hdr[0] | hdr[1] << 8), static_cast<int16_t>(hdr[2] | hdr[3] << 8),
+                     static_cast<int16_t>(hdr[4] | hdr[5] << 8), static_cast<int16_t>(hdr[6] | hdr[7] << 8), g_palette);
         std::fclose(f);
     }
     ++g_written;
@@ -248,7 +259,9 @@ void start_sprite_extraction(const std::string& dir) {
     hooks::sprite = on_sprite;
 }
 
-void extract_character(uint32_t base, uint32_t size) { g_catalog = Catalog{base, size, false}; }
+void extract_character(uint32_t base, uint32_t size, const std::vector<int>& palettes) {
+    g_catalog = Catalog{base, size, palettes, false};
+}
 
 void stop_sprite_extraction() { hooks::sprite = nullptr; }
 

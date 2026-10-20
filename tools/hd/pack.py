@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Build an HD pack for ki_play from upscaled canvases.
 
-usage: pack.py EXTRACT_DIR PREPARED_DIR UPSCALED_DIR PACK_DIR [--scale 4]
+usage: pack.py EXTRACT_DIR PREPARED_DIR UPSCALED_DIR PACK_DIR [--scale 4] [--recolor]
 - EXTRACT_DIR: ki_run --extract-sprites output (keys.txt)
 - PREPARED_DIR: prepare.py output (layout.txt, masks)
 - UPSCALED_DIR: c160/<image>.png ... upscaled by the scale factor
 writes PACK_DIR/<image>.ki4 and PACK_DIR/index.txt
 The alpha channel comes from the original mask, upscaled smoothly; the
 upscaled colours are kept only where the sprite is.
+
+--recolor: a sprite drawn with another palette (same header in index.txt, as
+written by ki_run --extract-character with several palettes) that has no
+upscaled canvas of its own gets the upscaled image of the first one with the
+difference between the two originals added, upscaled smoothly. Inside an area
+of one colour that is the exact palette swap; the detail the upscaler added
+is kept.
 """
 import os
 import struct
@@ -16,6 +23,34 @@ import zlib
 
 import numpy as np
 from PIL import Image, ImageFilter
+
+
+def original(ext: str, name: str) -> np.ndarray:
+    return np.asarray(Image.open(f"{ext}/{name}.ppm").convert("RGB"), np.float32)
+
+
+def recolor(ext: str, layout: dict, upscaled: dict, scale: int) -> None:
+    by_header = {}
+    for line in open(f"{ext}/index.txt"):
+        p = line.split()
+        by_header.setdefault((p[2], p[4]), []).append(p[0])  # header address, size
+    made = 0
+    for names in by_header.values():
+        base = next((n for n in names if n in upscaled), None)
+        if base is None:
+            continue
+        a = original(ext, base)
+        hd = upscaled[base].astype(np.float32)
+        for n in names:
+            if n in upscaled or n not in layout:
+                continue
+            diff = original(ext, n) - a
+            h, w = diff.shape[:2]
+            up = np.stack([np.asarray(Image.fromarray(diff[..., ch], "F").resize((w * scale, h * scale), Image.BICUBIC))
+                           for ch in range(3)], axis=-1)
+            upscaled[n] = np.clip(hd + up, 0, 255).astype(np.uint8)
+            made += 1
+    print(f"{made} images recoloured from another palette")
 
 
 def main() -> int:
@@ -27,6 +62,7 @@ def main() -> int:
         name, bucket, x, y, w, h = line.split()
         layout[name] = (int(bucket), int(x), int(y), int(w), int(h))
     written = 0
+    upscaled = {}
     for name, (bucket, x, y, w, h) in layout.items():
         src = f"{up}/c{bucket}/{name}.png"
         if not os.path.exists(src):
@@ -34,7 +70,11 @@ def main() -> int:
         big = Image.open(src).convert("RGB")
         if big.size != (bucket * scale, bucket * scale):
             big = big.resize((bucket * scale, bucket * scale), Image.LANCZOS)
-        rgb = np.asarray(big.crop((x * scale, y * scale, (x + w) * scale, (y + h) * scale)))
+        upscaled[name] = np.asarray(big.crop((x * scale, y * scale, (x + w) * scale, (y + h) * scale)))
+    if "--recolor" in sys.argv:
+        recolor(ext, layout, upscaled, scale)
+    for name, rgb in upscaled.items():
+        bucket, x, y, w, h = layout[name]
         mask = Image.open(f"{prep}/c{bucket}/{name}.mask.png").convert("L")
         m = np.asarray(mask.resize((w * scale, h * scale), Image.BICUBIC).filter(ImageFilter.GaussianBlur(0.6)),
                        np.float32) / 255

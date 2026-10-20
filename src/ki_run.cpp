@@ -78,10 +78,18 @@ int main(int argc, char** argv) {
         else if (k == "--wav-out") wav_out = v;
         else if (k == "--log-sprites") log_sprites = std::stoull(v);  // print the blitter calls of frame N
         else if (k == "--extract-sprites") sprite_dir = v;  // write each distinct sprite drawn to DIR
-        else if (k == "--extract-character") {  // BASE:SIZE (hex): also every sprite of this character data
-            size_t colon = v.find(':');
-            ki::extract_character(static_cast<uint32_t>(std::stoul(v.substr(0, colon), nullptr, 16)),
-                                  static_cast<uint32_t>(std::stoul(v.substr(colon + 1), nullptr, 16)));
+        else if (k == "--extract-character") {  // BASE:SIZE[:P,P,...] (hex; palettes decimal): every sprite of this character data
+            size_t c1 = v.find(':'), c2 = v.find(':', c1 + 1);
+            std::vector<int> palettes;
+            if (c2 != std::string::npos)
+                for (size_t p = c2 + 1; p < v.size();) {
+                    size_t q = v.find(',', p);
+                    if (q == std::string::npos) q = v.size();
+                    palettes.push_back(std::stoi(v.substr(p, q - p)));
+                    p = q + 1;
+                }
+            ki::extract_character(static_cast<uint32_t>(std::stoul(v.substr(0, c1), nullptr, 16)),
+                                  static_cast<uint32_t>(std::stoul(v.substr(c1 + 1, c2 - c1 - 1), nullptr, 16)), palettes);
         }
         else if (k == "--hd-pack") hd_pack = v;  // also write 4x frames (hd_frame_N.ppm) with this HD pack
         else if (k == "--save-at") save_at = std::stoull(v);  // save-state test: save at frame N ...
@@ -151,7 +159,7 @@ int main(int argc, char** argv) {
                             hw(2), hw(4), hw(6), r(23), r(24), r(9), r(11), r(12), r(18), r(22), r(4), r(7), r(20),
                             r(21), r(28), r(30));
                 if (std::getenv("KI_LOG_PALETTE")) {  // the palette: zero page 0..0xff (see ki_sprites.cpp)
-                    std::printf("    palette ");
+                    std::printf("    ra %08x palette ", ki::lo32(g.r[31]));
                     for (int i = 0; i < 0x100; ++i) std::printf("%02x", g.dram[0x90000 + i]);
                     std::printf("\n");
                 }

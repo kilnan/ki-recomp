@@ -751,9 +751,12 @@ there too; with 256 bytes there are 476 keys.
 - **Palettes.**
   - They come from a block read at boot (LBA 2730), as a bank of 256-byte palettes at 0x88090200.. in DRAM, with a pointer table at 0x88090100.
   - Before a draw, the game copies the palette it wants into the zero page.
-  - Which palette goes with which character, costume and side is still to be found.
+  - The draw routine (0x88001ffc) copies palette n from 0x88090100 + 256·n, where n is the signed byte at offset 0x8c of the fighter's object (0x43 if negative).
+  - n comes from a table at 0x8800265c (read at 0x88002b28): for each character, 8 pairs of (character id, palette). Character i uses palettes 6i+1 to 6i+6, i.e. **6 costumes**; the last two pairs repeat one of them. Combo (i = 1) uses 7–12.
 - **Extraction.** `ki_run --extract-sprites DIR --extract-character BASE:SIZE` draws every frame of every animation with the original blitter. It does this at the first normal draw of one of the character's sprites, with that call's palette, and writes `animations.txt` ("id frame header").
   - Combo: 71 animations, 823 frames, 588 distinct images.
+  - `--extract-character BASE:SIZE:7,8,9,10,11,12` draws them with each listed palette, and `index.txt` records it (`pal n`). For Combo that gives 515 images per costume.
+- **Costumes in the HD pack.** `pack.py --recolor` takes, for a sprite drawn with another palette and not upscaled itself, the upscaled image of the same header. It adds the difference between the two originals, upscaled bicubically: inside an area of one colour this is the exact palette swap, and the added detail is kept. So one upscale per pose covers the six costumes.
 
 **HD rendering** (`src/ki_hd.cpp`; `ki_play --hd-pack DIR`, H toggles,
 `ki_run --hd-pack DIR` writes `hd_frame_N.ppm`).
