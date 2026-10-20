@@ -192,8 +192,16 @@ inline void ddivu(Context& c, uint64_t a, uint64_t b) {
 
 inline uint32_t ea(uint64_t base, int32_t offset) { return lo32(base + static_cast<uint64_t>(static_cast<int64_t>(offset))); }
 
+#ifdef KI_MEM_PROBE
+// Debug builds only (-DKI_MEM_PROBE): called for every RAM access.
+inline void (*g_mem_probe)(Context& c, uint32_t vaddr, int size, uint32_t pc, bool store) = nullptr;
+#endif
+
 // Returns a host pointer for a RAM access, or nullptr for I/O / unmapped.
 inline uint8_t* ram_ptr(Context& c, uint32_t vaddr, int size, uint32_t pc, bool store) {
+#ifdef KI_MEM_PROBE
+    if (g_mem_probe) g_mem_probe(c, vaddr, size, pc, store);
+#endif
     if ((vaddr & static_cast<uint32_t>(size - 1)) != 0)
         raise_fault(c, store ? Fault::AddressErrorStore : Fault::AddressErrorLoad, pc, vaddr);
     uint32_t phys;

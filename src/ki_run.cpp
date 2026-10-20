@@ -11,6 +11,7 @@
 // leaves them when it enters the game. Framebuffers are written as PPM files.
 #include <chrono>
 #include <cstdio>
+#include <map>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -43,6 +44,7 @@ int main(int argc, char** argv) {
     std::string boot, disk, rom, out = ".", inputs, sound_roms, wav_out;
     static uint32_t dump_at = 0;
     static unsigned long dump_hit = 1;
+    static uint64_t board_frame = 0;  // the frame being run (for KI_MEM_PROBE)
     static uint64_t call_log_from = ~0ull;  // frame from which function entries are logged
     static std::vector<uint32_t> call_log;
     static std::string trace_path;
@@ -144,6 +146,7 @@ int main(int argc, char** argv) {
     size_t next_event = 0;
     auto t0 = std::chrono::steady_clock::now();
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
+        board_frame = frame + 1;
         if (frame == call_log_from) ctx.call_log = &call_log;
         if (log_sprites && frame == log_sprites) {
             std::printf("sprites drawn in frame %llu: hdr(v1) [h0 h2 h4 h6] x(s7) y(t8) sx(t1) sy(t3) t4 s2 mode(s6) a0 a3 s4 s5 gp s8\n",
@@ -326,6 +329,30 @@ int main(int argc, char** argv) {
     if (dcs) state.bind(board, dcs.get(), ki::read_sound_roms_or_die(sound_roms));
     else state.bind(board, nullptr, {});
     if (!sprite_dir.empty()) ki::start_sprite_extraction(sprite_dir);
+#ifdef KI_MEM_PROBE
+    // KI_MEM_PROBE=LO-HI[:FRAME]: accesses made by code in [LO, HI), per 1 KB page of address, during FRAME.
+    if (const char* probe = std::getenv("KI_MEM_PROBE")) {
+        static uint32_t lo, hi;
+        static uint64_t probe_frame;
+        unsigned long long f = 0;
+        std::sscanf(probe, "%x-%x:%llu", &lo, &hi, &f);
+        probe_frame = f;
+        static std::map<uint64_t, std::pair<unsigned, unsigned>> pages;  // page -> loads, stores
+        ki::g_mem_probe = [](ki::Context& ctx, uint32_t va, int, uint32_t pc, bool store) {
+            if (pc - lo >= hi - lo || (probe_frame && board_frame != probe_frame)) return;
+            static const bool by_pc = std::getenv("KI_MEM_PROBE_BY_PC") != nullptr;  // key: code page instead
+            auto& e = pages[by_pc ? pc >> 6 : va >> 10];
+            (store ? e.second : e.first)++;
+            (void)ctx;
+        };
+        std::atexit([] {
+            for (const auto& [page, n] : pages)
+                std::fprintf(stderr, "probe %08llx loads %u stores %u\n",
+                             static_cast<unsigned long long>(page << (std::getenv("KI_MEM_PROBE_BY_PC") ? 6 : 10)), n.first,
+                             n.second);
+        });
+    }
+#endif
 #ifdef KI_HAVE_HD
     if (!hd_pack.empty()) {
         if (!hd.load_pack(hd_pack)) std::fprintf(stderr, "no HD pack in %s\n", hd_pack.c_str());
