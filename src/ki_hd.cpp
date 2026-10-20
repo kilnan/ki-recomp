@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -45,6 +46,15 @@ bool HdRenderer::load_pack(const std::string& dir) {
         im.file = dir + "/" + image + ".ki4";
         pack_[std::stoull(key, nullptr, 16)] = im;
     }
+    std::ifstream pf(dir + "/panoramas.txt");
+    while (std::getline(pf, line)) {
+        std::istringstream ls(line);
+        std::string key;
+        Panorama pano;
+        if (!(ls >> key >> pano.w >> pano.stride >> pano.h)) continue;
+        pano.file = dir + "/pano_" + key;
+        panoramas_[std::stoull(key, nullptr, 16)] = pano;
+    }
     std::ifstream sh(dir + "/shapes.txt");
     while (std::getline(sh, line)) {
         std::istringstream ls(line);
@@ -55,18 +65,22 @@ bool HdRenderer::load_pack(const std::string& dir) {
         im.kix_file = dir + "/" + image + ".kix";
         shapes_[std::stoull(key, nullptr, 16)] = im;
     }
-    return !pack_.empty();
+    return !pack_.empty() || !panoramas_.empty();
 }
 
 void HdRenderer::attach() {
     g_hd = this;
     hooks::sprite = on_before;
     hooks::sprite_after = on_after;
+    hooks::panorama = on_panorama;
+    hooks::panorama_after = on_panorama_after;
 }
 
 void HdRenderer::detach() {
     hooks::sprite = nullptr;
     hooks::sprite_after = nullptr;
+    hooks::panorama = nullptr;
+    hooks::panorama_after = nullptr;
     g_hd = nullptr;
 }
 
@@ -108,6 +122,29 @@ bool HdRenderer::load_kix(Image& im) {
         im.entries.clear();
         return false;
     }
+    // Transparent pixels take the entry of an opaque neighbour (a few passes),
+    // so the colour correction near the edge is the edge's own, not zero:
+    // otherwise the original's pixel staircase shows along the outline.
+    std::vector<uint8_t> e = im.entries;
+    for (int pass = 0; pass < 3; ++pass) {
+        std::vector<uint8_t> next = e;
+        for (int y = 0; y < im.h; ++y)
+            for (int x = 0; x < im.w; ++x) {
+                if (e[static_cast<size_t>(y) * im.w + x] != 0xff) continue;
+                static const int kN[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+                for (const auto& d : kN) {
+                    int nx = x + d[0], ny = y + d[1];
+                    if (nx < 0 || ny < 0 || nx >= im.w || ny >= im.h) continue;
+                    uint8_t v = e[static_cast<size_t>(ny) * im.w + nx];
+                    if (v != 0xff) {
+                        next[static_cast<size_t>(y) * im.w + x] = v;
+                        break;
+                    }
+                }
+            }
+        e.swap(next);
+    }
+    im.entries = e;
     return true;
 }
 
@@ -129,18 +166,64 @@ HdRenderer::Image* HdRenderer::recoloured(const Context& c, Image& base) {
         int c5 = (v >> (5 * ch)) & 31;
         return (c5 << 3) | (c5 >> 2);
     };
-    int delta[128][3];
     bool same = true;
-    for (int n = 0; n < 128; ++n)
-        for (int ch = 0; ch < 3; ++ch) {
-            delta[n][ch] = rgb(pal, n, ch) - rgb(base.palette.data(), n, ch);
-            same = same && delta[n][ch] == 0;
-        }
+    for (int n = 0; n < 128 && same; ++n)
+        for (int ch = 0; ch < 3; ++ch) same = same && rgb(pal, n, ch) == rgb(base.palette.data(), n, ch);
     Image& v = variants_[h];
     v = base;
     v.entries.clear();
     v.palette.clear();
     if (same) return &v;
+    // First a colour transform common to all entries (a stage's lighting, a
+    // flash): new = M * old + t, fitted by least squares over the entries the
+    // image uses, applied to the HD pixels themselves. What it does not explain
+    // (a costume) is added per entry as before.
+    unsigned used[128] = {};
+    for (uint8_t e : base.entries)
+        if (e != 0xff) ++used[e & 0x7f];
+    double ata[4][4] = {}, atb[4][3] = {};
+    for (int n = 0; n < 128; ++n) {
+        if (!used[n]) continue;
+        double x[4] = {double(rgb(base.palette.data(), n, 0)), double(rgb(base.palette.data(), n, 1)),
+                       double(rgb(base.palette.data(), n, 2)), 1.0};
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) ata[i][j] += used[n] * x[i] * x[j];
+            for (int ch = 0; ch < 3; ++ch) atb[i][ch] += used[n] * x[i] * rgb(pal, n, ch);
+        }
+    }
+    double m[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};  // identity if the fit is singular
+    {
+        double a[4][7];
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) a[i][j] = ata[i][j] + (i == j ? 1e-3 : 0);  // ridge, for flat images
+            for (int ch = 0; ch < 3; ++ch) a[i][4 + ch] = atb[i][ch];
+        }
+        bool ok = true;
+        for (int col = 0; col < 4 && ok; ++col) {
+            int piv = col;
+            for (int i = col + 1; i < 4; ++i)
+                if (std::fabs(a[i][col]) > std::fabs(a[piv][col])) piv = i;
+            if (std::fabs(a[piv][col]) < 1e-9) ok = false;
+            else {
+                for (int j = 0; j < 7; ++j) std::swap(a[col][j], a[piv][j]);
+                for (int i = 0; i < 4; ++i)
+                    if (i != col) {
+                        double f = a[i][col] / a[col][col];
+                        for (int j = 0; j < 7; ++j) a[i][j] -= f * a[col][j];
+                    }
+            }
+        }
+        if (ok)
+            for (int ch = 0; ch < 3; ++ch)
+                for (int i = 0; i < 4; ++i) m[ch][i] = a[i][4 + ch] / a[i][i];
+    }
+    auto apply = [&](int ch, double r, double g, double b) { return m[ch][0] * r + m[ch][1] * g + m[ch][2] * b + m[ch][3]; };
+    int delta[128][3];
+    for (int n = 0; n < 128; ++n)
+        for (int ch = 0; ch < 3; ++ch)
+            delta[n][ch] = static_cast<int>(std::lround(
+                rgb(pal, n, ch) - apply(ch, rgb(base.palette.data(), n, 0), rgb(base.palette.data(), n, 1),
+                                        rgb(base.palette.data(), n, 2))));
     const int w = base.w, ht = base.h;
     auto d_at = [&](int x, int y, int ch) {
         x = std::clamp(x, 0, w - 1), y = std::clamp(y, 0, ht - 1);
@@ -158,11 +241,12 @@ HdRenderer::Image* HdRenderer::recoloured(const Context& c, Image& base) {
             int x0 = static_cast<int>(std::floor(fx));
             float wx = fx - x0;
             uint32_t out = px & 0xff000000u;
+            double r0 = (px >> 16) & 255, g0 = (px >> 8) & 255, b0 = px & 255;
             for (int ch = 0; ch < 3; ++ch) {
                 float d = (d_at(x0, y0, ch) * (1 - wx) + d_at(x0 + 1, y0, ch) * wx) * (1 - wy) +
                           (d_at(x0, y0 + 1, ch) * (1 - wx) + d_at(x0 + 1, y0 + 1, ch) * wx) * wy;
                 int shift = 16 - 8 * ch;  // BGR555 bits 0-4 are red (ARGB bits 16-23), as argb_of
-                int val = static_cast<int>((px >> shift) & 255) + static_cast<int>(std::lround(d));
+                int val = static_cast<int>(std::lround(apply(ch, r0, g0, b0) + d));
                 out |= static_cast<uint32_t>(std::clamp(val, 0, 255)) << shift;
             }
             px = out;
@@ -211,7 +295,20 @@ void HdRenderer::sync(const Context& c, uint32_t bank) {
     }
 }
 
+void HdRenderer::invalidate(const Context& c, uint32_t bank) {
+    // A pixel the game redraws with the same value as before would otherwise
+    // keep the HD image of the last frame (trails, fragments).
+    Bank& b = bank_of(bank);
+    const uint16_t* lo = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
+    for (const Rect& r : b.hd_rects)
+        for (int y = r.y0; y <= r.y1; ++y)
+            for (int x = r.x0; x <= r.x1; ++x) b.shadow[y * 320 + x] = static_cast<uint16_t>(~lo[y * 320 + x]);
+    b.hd_rects.clear();
+}
+
 void HdRenderer::draw(Bank& b, const Image& im, int x0, int y0, int x1, int y1, bool mirror) {
+    b.hd_rects.push_back({std::clamp(x0, 0, 319), std::clamp(y0, 0, 239), std::clamp(x1, 0, 319), std::clamp(y1, 0, 239)});
+    if (b.hd_rects.back().x0 > b.hd_rects.back().x1 || b.hd_rects.back().y0 > b.hd_rects.back().y1) b.hd_rects.pop_back();
     // Maps the HD image onto original pixels x0..x1, y0..y1 (inclusive).
     int dx0 = x0 * kScale, dy0 = y0 * kScale, dw = (x1 - x0 + 1) * kScale, dh = (y1 - y0 + 1) * kScale;
     for (int y = 0; y < dh; ++y) {
@@ -242,6 +339,10 @@ void HdRenderer::draw(Bank& b, const Image& im, int x0, int y0, int x1, int y1, 
 void HdRenderer::on_before(Context& c) {
     HdRenderer& r = *g_hd;
     r.bank_ = (c.dram[0x86200] & 1) ? 0x58000 : 0x30000;  // the blitter's target (0x88010900)
+    if (r.bank_ != r.last_bank_) {  // the first sprite of a new frame in this bank
+        r.invalidate(c, r.bank_);
+        r.last_bank_ = r.bank_;
+    }
     r.sync(c, r.bank_);
     r.key_ = sprite_key(c);
     r.shape_ = sprite_shape_key(c);
@@ -309,6 +410,93 @@ void HdRenderer::print_misses(FILE* f) const {
     std::fprintf(f, "HD misses (%zu header/mode pairs): header mode calls\n", v.size());
     for (const auto& [k, n] : v)
         std::fprintf(f, "  %08x %3d %u\n", static_cast<uint32_t>(k >> 32), static_cast<int32_t>(static_cast<uint32_t>(k)), n);
+}
+
+bool HdRenderer::load_panorama(Panorama& p) {
+    p.loaded = true;
+    std::ifstream raw(p.file + ".raw", std::ios::binary);
+    p.original.resize(static_cast<size_t>(p.stride) * p.h);
+    if (!raw.read(reinterpret_cast<char*>(p.original.data()), static_cast<std::streamsize>(p.original.size() * 2))) {
+        p.original.clear();
+        return false;
+    }
+    Image im;
+    im.file = p.file + ".ki4";
+    if (!load(im) || im.missing || im.iw != p.w * kScale || im.ih != p.h * kScale) {
+        p.original.clear();
+        return false;
+    }
+    p.hd = std::move(im.argb);
+    return true;
+}
+
+void HdRenderer::on_panorama(Context& c) {
+    HdRenderer& r = *g_hd;
+    const int regs[6] = {2, 3, 4, 5, 6, 7};
+    for (int i = 0; i < 6; ++i) r.pano_regs_[i] = lo32(c.r[regs[i]]);
+}
+
+void HdRenderer::on_panorama_after(Context& c) {
+    HdRenderer& r = *g_hd;
+    uint32_t dst = r.pano_regs_[0], src = r.pano_regs_[1];
+    int col0 = static_cast<int32_t>(r.pano_regs_[2]), row0 = static_cast<int32_t>(r.pano_regs_[3]);
+    int w = static_cast<int32_t>(r.pano_regs_[4]), rows = static_cast<int32_t>(r.pano_regs_[5]);
+    uint32_t bank = dst & 0x1fffffffu;  // physical: the framebuffer's SRAM offset
+    if ((bank != 0x30000 && bank != 0x58000) || w <= 0 || rows <= 0 || src - 0x88000000u >= c.dram.size()) return;
+    const int stride = w + 4;
+    uint32_t s0 = src - 0x88000000u;
+    if (s0 + static_cast<uint64_t>(stride) * 2 > c.dram.size()) return;
+    uint64_t key = 1469598103934665603ull;
+    for (int i = 0; i < stride * 2; ++i) key = (key ^ c.dram[s0 + i]) * 1099511628211ull;
+    auto it = r.panoramas_.find(key);
+    static const bool debug = std::getenv("KI_HD_DEBUG") != nullptr;
+    if (debug) {
+        static int shown = 0;
+        if (shown++ < 4)
+            std::fprintf(stderr, "panorama copy: src %08x col %d row %d w %d rows %d key %016llx%s\n", src, col0, row0, w,
+                         rows, static_cast<unsigned long long>(key), it == r.panoramas_.end() ? " (not in pack)" : "");
+    }
+    if (it == r.panoramas_.end()) return;
+    Panorama& p = it->second;
+    if (!p.loaded) r.load_panorama(p);
+    if (p.original.empty() || p.w != w || p.stride != stride) return;
+    if (std::getenv("KI_HD_DEBUG")) {  // which column shift makes the copied rows match the source
+        static int shown = 0;
+        const uint16_t* fb = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
+        int row = std::max(0, -row0) + 2, y = row0 + row;
+        if (shown++ < 4 && y >= 0 && y < 240 && row < p.h) {
+            for (int shift = -8; shift <= 8; ++shift) {
+                int ok = 0;
+                for (int x = 0; x < 320; ++x)
+                    ok += fb[y * 320 + x] == p.original[static_cast<size_t>(row) * stride + 4 + ((((col0 + x + shift) % w) + w) % w)];
+                if (ok > 200) std::fprintf(stderr, "  row %d shift %d: %d/320 match\n", row, shift, ok);
+            }
+        }
+    }
+    // Synced first, so the pixels the copy changed are the only ones left.
+    Bank& b = r.bank_of(bank);
+    const uint16_t* lo = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
+    col0 = ((col0 % w) + w) % w;
+    for (int row = 0; row < rows && row < p.h; ++row) {
+        int y = row0 + row;
+        if (y < 0 || y >= 240) continue;
+        for (int x = 0; x < 320; ++x) {
+            int col = (col0 + x) % w;
+            uint16_t v = lo[y * 320 + x];
+            // Where the game drew over its panorama (the billboards), it stays
+            // to the game: upscaled from its own pixels by the next sync.
+            // Each row starts with 4 pixels of margin, then the w columns that wrap around.
+            if (v != p.original[static_cast<size_t>(row) * stride + 4 + col]) {
+                ++r.pano_kept_;
+                continue;
+            }
+            ++r.pano_hd_;
+            b.shadow[y * 320 + x] = v;
+            for (int sy = 0; sy < kScale; ++sy)
+                std::memcpy(&b.hd[static_cast<size_t>(y * kScale + sy) * kW + x * kScale],
+                            &p.hd[static_cast<size_t>(row * kScale + sy) * p.w * kScale + col * kScale], kScale * 4);
+        }
+    }
 }
 
 const std::vector<uint32_t>& HdRenderer::frame(const Context& c, uint32_t bank) {

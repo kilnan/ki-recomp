@@ -78,9 +78,12 @@ def main() -> int:
     for name, rgb in upscaled.items():
         bucket, x, y, w, h = layout[name]
         mask = Image.open(f"{prep}/c{bucket}/{name}.mask.png").convert("L")
-        m = np.asarray(mask.resize((w * scale, h * scale), Image.BICUBIC).filter(ImageFilter.GaussianBlur(0.6)),
+        # The mask is enlarged, blurred by about half an original pixel, and cut
+        # around 50%: the outline follows the shape smoothly instead of the
+        # original pixel staircase (visible when the game draws a sprite enlarged).
+        m = np.asarray(mask.resize((w * scale, h * scale), Image.BICUBIC).filter(ImageFilter.GaussianBlur(scale * 0.5)),
                        np.float32) / 255
-        alpha = np.clip((m - 0.35) / 0.3, 0, 1)  # smooth edge around the 50% contour
+        alpha = np.clip((m - 0.4) / 0.2, 0, 1)
         argb = (np.round(alpha * 255).astype(np.uint32) << 24) | (rgb[..., 0].astype(np.uint32) << 16) | \
                (rgb[..., 1].astype(np.uint32) << 8) | rgb[..., 2].astype(np.uint32)
         data = zlib.compress(argb.astype("<u4").tobytes(), 6)

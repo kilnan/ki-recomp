@@ -257,7 +257,12 @@ int main(int argc, char** argv) {
                     ki::write_wav(wav_path, dcs->samples(), static_cast<uint32_t>(dcs->sample_rate() + 0.5));
             }
 #ifdef KI_HAVE_HD
-            if (!hd_pack.empty()) hd.print_misses(stdout);
+            if (!hd_pack.empty()) {
+                hd.print_misses(stdout);
+                std::printf("HD panorama pixels: %llu replaced, %llu left to the game\n",
+                            static_cast<unsigned long long>(hd.panorama_pixels_hd()),
+                            static_cast<unsigned long long>(hd.panorama_pixels_kept()));
+            }
 #endif
             std::printf("\nstatus %08llx cause %08llx  sound writes %llu\n",
                         static_cast<unsigned long long>(ctx.cp0[ki::kCp0Status]),

@@ -10,6 +10,8 @@ namespace hooks {
 Fn sprite = nullptr;
 Fn sprite_after = nullptr;
 Fn fight_setup = nullptr;
+Fn panorama = nullptr;
+Fn panorama_after = nullptr;
 }
 
 void raise_fault(Context&, Fault fault, uint32_t pc, uint32_t addr) {

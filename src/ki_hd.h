@@ -33,6 +33,8 @@ public:
     unsigned hd_sprites_drawn() const { return hd_drawn_; }
     // Blitter calls with no HD image, per header and mode (to find what a pack misses).
     void print_misses(FILE* f) const;
+    uint64_t panorama_pixels_hd() const { return pano_hd_; }
+    uint64_t panorama_pixels_kept() const { return pano_kept_; }
 
 private:
     struct Image {
@@ -46,10 +48,31 @@ private:
         bool kix_loaded = false;
         std::vector<uint8_t> palette, entries;
     };
+    struct Rect {
+        int x0, y0, x1, y1;  // original pixels, inclusive
+    };
     struct Bank {
         std::vector<uint16_t> shadow = std::vector<uint16_t>(320 * 240, 0xffff);
         std::vector<uint32_t> hd = std::vector<uint32_t>(kW * kH, 0xff000000u);
+        // Where HD images were drawn: the HD copy there no longer matches the
+        // shadow, so it is upscaled again when the game next draws this bank.
+        std::vector<Rect> hd_rects;
     };
+    void invalidate(const Context& c, uint32_t bank);
+    // A stage panorama (panoramas.txt): its original pixels (to tell where the
+    // game drew over its copy) and the HD picture, (w * 4) x (h * 4).
+    struct Panorama {
+        std::string file;
+        int w = 0, stride = 0, h = 0;
+        bool loaded = false;
+        std::vector<uint16_t> original;
+        std::vector<uint32_t> hd;
+    };
+    static void on_panorama(Context& c);
+    static void on_panorama_after(Context& c);
+    bool load_panorama(Panorama& p);
+    std::unordered_map<uint64_t, Panorama> panoramas_;  // key: FNV of the first row
+    uint32_t pano_regs_[6] = {};                      // v0 v1 a0 a1 a2 a3 at the copy's entry
     static void on_before(Context& c);
     static void on_after(Context& c);
     Bank& bank_of(uint32_t offset) { return banks_[offset == 0x58000 ? 1 : 0]; }
@@ -67,9 +90,10 @@ private:
     Bank banks_[2];
     // the current blitter call
     uint64_t key_ = 0, shape_ = 0;
-    uint32_t bank_ = 0;
+    uint32_t bank_ = 0, last_bank_ = ~0u;
     int32_t s7_ = 0, t8_ = 0, t1_ = 4096, t3_ = 4096, t4_ = 2, mode_ = 0;
     unsigned hd_drawn_ = 0;
+    uint64_t pano_hd_ = 0, pano_kept_ = 0;  // panorama pixels replaced / left to the game
     uint32_t header_ = 0;
     std::unordered_map<uint64_t, unsigned> misses_;  // header << 32 | mode -> calls
 };

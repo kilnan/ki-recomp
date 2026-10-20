@@ -21,5 +21,11 @@ extern Fn sprite_after;
 // (0x8808f5f0 / 0x8808f5f4) are loaded: entry of 0x8800e188, whose only
 // caller is the fight setup at 0x88000680. A host may change them here.
 extern Fn fight_setup;
+// Stage panorama copy 0x88018c98 (v0 framebuffer, v1 panorama row 0, a0 first
+// column, a1 first row, a2 width, a3 rows; each row is 4 pixels of margin then
+// the a2 columns that wrap around):
+// entry and after the copy.
+extern Fn panorama;
+extern Fn panorama_after;
 
 }  // namespace ki::hooks

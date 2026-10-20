@@ -798,6 +798,20 @@ there too; with 256 bytes there are 476 keys.
 - Stages 6–9 are variants of one stage; after loading, the setup stores 6.
 - The opponent order in a one-player game comes from the game's bytecode and has not been followed. Instead, `src/ki_fight.cpp` overrides 0x8800e188 (`hooks::fight_setup`) and rewrites the stage byte and the game-controlled fighter before anything is loaded.
 
+**Stages [O].** Three kinds of drawing were found:
+- **Panoramas** (Combo, Thunder, …). 0x88018c98 copies a window of wide pictures, sky and buildings as two layers that scroll at different speeds.
+  - Arguments: v0 framebuffer, v1 row 0, a0 first column, a1 first screen row, a2 width (960), a3 rows.
+  - Each row has 4 margin pixels, then the 960 columns, which wrap around.
+  - The game draws its billboards into the DRAM copy of the picture.
+- **Floors.** 0x8801c740 and its siblings scale a texture row by row into a trapezoid, the "mode 7" floor.
+- **Pre-rendered stages** (Cinder, Orchid, …). Whole 320×242 16-bit frames, one per camera position, are drawn by the hand-written renderer at 0x88030b9c. Not hooked yet.
+
+**HD panoramas** (`tools/hd/panorama.py`, `panoramas.txt` in a pack).
+- **Upscale.** The layers are read from the stage file on disk, without billboards, and upscaled once with columns wrapped on both sides.
+- **Drawing.** After each copy, a pixel equal to the original picture gets the HD picture; one the game drew over stays the game's. On Combo's stage that is 99.94% of the copied pixels.
+- **Keys.** The key is the FNV hash of the layer's first row.
+- **Invalidation.** The areas HD sprites were drawn on are invalidated at the next draw into that framebuffer, so a pixel redrawn with its old value cannot keep a stale HD image.
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:
