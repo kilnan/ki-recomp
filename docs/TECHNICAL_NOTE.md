@@ -740,6 +740,21 @@ bytes used as zero-page addresses of halfwords (0x88010f50). Keying on the
 whole zero page made 1,933 keys for 456 images, because other variables live
 there too; with 256 bytes there are 476 keys.
 
+**Character data [O]** (found on the L1.5D disk; the layout is from the data, the meaning of the ids is not known):
+- **Directory.** A table at 0x8800d86c has 11 entries of (first LBA, sectors, bytes), one per character, including Eyedol. The data start at LBA 3000 + 5120·i. The byte count of the character in play reads 0.
+- **Loading.** The whole entry is read into DRAM at 0x880b1400 (Combo in the soak session).
+- **Animations.** The data are a sequence of animations, each laid out as `[u16 id][u16 frames][u32 size][frames × u32 offset]`.
+  - Each offset, from the start of the animation, points to a sprite exactly as the blitter receives it: header h0, h2, w, h, then the data, uncompressed. The bytes on disk are equal to the bytes in DRAM.
+  - An offset equal to the size is an empty frame. A repeated offset is a frame held for longer.
+  - Zero words pad between some animations.
+  - Combo's data end with a structure of another kind (at +0x24a4d8), not decoded yet.
+- **Palettes.**
+  - They come from a block read at boot (LBA 2730), as a bank of 256-byte palettes at 0x88090200.. in DRAM, with a pointer table at 0x88090100.
+  - Before a draw, the game copies the palette it wants into the zero page.
+  - Which palette goes with which character, costume and side is still to be found.
+- **Extraction.** `ki_run --extract-sprites DIR --extract-character BASE:SIZE` draws every frame of every animation with the original blitter. It does this at the first normal draw of one of the character's sprites, with that call's palette, and writes `animations.txt` ("id frame header").
+  - Combo: 71 animations, 823 frames, 588 distinct images.
+
 **HD rendering** (`src/ki_hd.cpp`; `ki_play --hd-pack DIR`, H toggles,
 `ki_run --hd-pack DIR` writes `hd_frame_N.ppm`).
 - **Copies.** For each framebuffer a 4x copy and a shadow of the original

@@ -94,10 +94,58 @@ void probe_geometry(Context& c) {
     c = saved;
 }
 
+// A character's data as loaded in DRAM (see TECHNICAL_NOTE "Character data"):
+// a sequence of animations, each [u16 id][u16 frames][u32 size][frames x u32
+// offset of a sprite from the animation's start]. An offset equal to the size
+// is an empty frame; zero words pad between some animations.
+struct Catalog {
+    uint32_t base = 0, size = 0;
+    bool done = false;
+} g_catalog;
+
+void extract(Context& c, uint64_t key);
+
+// At the first normal draw of a sprite of the character, every sprite of the
+// character is drawn the same way (same palette, mode and target).
+void extract_catalog(Context& c) {
+    g_catalog.done = true;
+    const Context saved = c;
+    auto u16 = [&](uint32_t a) { return static_cast<uint32_t>(c.dram[a] | c.dram[a + 1] << 8); };
+    auto u32 = [&](uint32_t a) { return u16(a) | u16(a + 2) << 16; };
+    const uint32_t base = g_catalog.base - 0x88000000u, end = base + g_catalog.size;
+    FILE* anim = std::fopen((g_dir + "/animations.txt").c_str(), "a");
+    unsigned anims = 0, frames = 0;
+    for (uint32_t off = base; off + 8 <= end;) {
+        uint32_t id = u16(off), count = u16(off + 2), size = u32(off + 4);
+        if (size == 0 && id == 0 && count == 0) {
+            off += 4;
+            continue;
+        }
+        if (size < 8 + 4 * count || off + size > end) {
+            std::fprintf(stderr, "character data: not an animation at %08x, stopped\n", 0x88000000u + off);
+            break;
+        }
+        ++anims;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t o = u32(off + 8 + 4 * i);
+            if (anim) std::fprintf(anim, "%04x %2u %08x\n", id, i, o < size ? 0x88000000u + off + o : 0);
+            if (o >= size) continue;
+            ++frames;
+            c.r[3] = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(0x88000000u + off + o)));
+            uint64_t key = sprite_key(c);
+            if (g_seen_keys.insert(key).second) extract(c, key);
+        }
+        off += size;
+    }
+    if (anim) std::fclose(anim);
+    c = saved;
+    std::fprintf(stderr, "character data %08x: %u animations, %u frames, %u images written so far\n",
+                 g_catalog.base, anims, frames, g_written);
+}
+
 void on_sprite(Context& c) {
     uint32_t h = lo32(c.r[3]);
     if (h - 0x88000000u >= c.dram.size() - 1024) return;
-    const uint8_t* hdr = &c.dram[h - 0x88000000u];
     if (lo32(c.r[22]) == 48) return;  // mode 48: the squashed dark shadow of a sprite drawn normally too
     static int probes = std::getenv("KI_SPRITE_GEOMETRY") ? 3 : 0;
     const uint8_t* ph = &c.dram[h - 0x88000000u];
@@ -105,9 +153,16 @@ void on_sprite(Context& c) {
         --probes;
         probe_geometry(c);
     }
+    if (g_catalog.size && !g_catalog.done && lo32(c.r[22]) == 0 && h - g_catalog.base < g_catalog.size)
+        extract_catalog(c);
     uint64_t key = sprite_key(c);
     if (!g_seen_keys.insert(key).second) return;
+    extract(c, key);
+}
 
+void extract(Context& c, uint64_t key) {
+    uint32_t h = lo32(c.r[3]);
+    const uint8_t* hdr = &c.dram[h - 0x88000000u];
     const Context saved = c;  // the extra draws must leave no trace
     // A plain copy in the sprite's own mode: scale 1, no mirroring, full-screen clip window.
     Context args = saved;
@@ -192,6 +247,8 @@ void start_sprite_extraction(const std::string& dir) {
     g_dir = dir;
     hooks::sprite = on_sprite;
 }
+
+void extract_character(uint32_t base, uint32_t size) { g_catalog = Catalog{base, size, false}; }
 
 void stop_sprite_extraction() { hooks::sprite = nullptr; }
 

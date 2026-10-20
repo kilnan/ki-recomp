@@ -78,6 +78,11 @@ int main(int argc, char** argv) {
         else if (k == "--wav-out") wav_out = v;
         else if (k == "--log-sprites") log_sprites = std::stoull(v);  // print the blitter calls of frame N
         else if (k == "--extract-sprites") sprite_dir = v;  // write each distinct sprite drawn to DIR
+        else if (k == "--extract-character") {  // BASE:SIZE (hex): also every sprite of this character data
+            size_t colon = v.find(':');
+            ki::extract_character(static_cast<uint32_t>(std::stoul(v.substr(0, colon), nullptr, 16)),
+                                  static_cast<uint32_t>(std::stoul(v.substr(colon + 1), nullptr, 16)));
+        }
         else if (k == "--hd-pack") hd_pack = v;  // also write 4x frames (hd_frame_N.ppm) with this HD pack
         else if (k == "--save-at") save_at = std::stoull(v);  // save-state test: save at frame N ...
         else if (k == "--load-at") load_at = std::stoull(v);  // ... and load it back at frame M (once)
@@ -145,6 +150,11 @@ int main(int argc, char** argv) {
                 std::printf("  %08x [%5d %5d %5d %5d] %6d %6d %5d %5d %6d %6d %3d %6d %6d %6d %6d %4d %4d\n", h, hw(0),
                             hw(2), hw(4), hw(6), r(23), r(24), r(9), r(11), r(12), r(18), r(22), r(4), r(7), r(20),
                             r(21), r(28), r(30));
+                if (std::getenv("KI_LOG_PALETTE")) {  // the palette: zero page 0..0xff (see ki_sprites.cpp)
+                    std::printf("    palette ");
+                    for (int i = 0; i < 0x100; ++i) std::printf("%02x", g.dram[0x90000 + i]);
+                    std::printf("\n");
+                }
             };
         } else if (log_sprites && frame == log_sprites + 1) {
             ki::hooks::sprite = nullptr;

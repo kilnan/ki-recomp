@@ -16,6 +16,9 @@ namespace ki {
 // written to `dir` as PPM (opaque pixels; others in key colour 0x00ff00).
 void start_sprite_extraction(const std::string& dir);
 void stop_sprite_extraction();
+// Also extract every sprite of the character data at DRAM [base, base+size),
+// at the first normal draw of one of them (its palette and mode).
+void extract_character(uint32_t base, uint32_t size);
 // Number of distinct sprites written so far.
 unsigned extracted_sprites();
 
