@@ -259,6 +259,8 @@ int main(int argc, char** argv) {
 #ifdef KI_HAVE_HD
             if (!hd_pack.empty()) {
                 hd.print_misses(stdout);
+                std::printf("HD sprites: %llu exact, %llu recoloured\n", static_cast<unsigned long long>(hd.hits_exact_),
+                            static_cast<unsigned long long>(hd.hits_shape_));
                 std::printf("HD panorama pixels: %llu replaced, %llu left to the game\n",
                             static_cast<unsigned long long>(hd.panorama_pixels_hd()),
                             static_cast<unsigned long long>(hd.panorama_pixels_kept()));

@@ -33,6 +33,8 @@ public:
     unsigned hd_sprites_drawn() const { return hd_drawn_; }
     // Blitter calls with no HD image, per header and mode (to find what a pack misses).
     void print_misses(FILE* f) const;
+    // The misses of the last frames only (cleared by each call), with each sprite's palette.
+    void dump_recent_misses(FILE* f);
     uint64_t panorama_pixels_hd() const { return pano_hd_; }
     uint64_t panorama_pixels_kept() const { return pano_kept_; }
     uint64_t prerendered_blocks_hd() const { return pre_blocks_hd_; }
@@ -106,11 +108,21 @@ private:
     // the current blitter call
     uint64_t key_ = 0, shape_ = 0;
     uint32_t bank_ = 0, last_bank_ = ~0u;
-    int32_t s7_ = 0, t8_ = 0, t1_ = 4096, t3_ = 4096, t4_ = 2, mode_ = 0;
+    int32_t s7_ = 0, t8_ = 0, t1_ = 4096, t3_ = 4096, t4_ = 2, mode_ = 0, a0_ = 0;
     unsigned hd_drawn_ = 0;
-    uint64_t pano_hd_ = 0, pano_kept_ = 0;  // panorama pixels replaced / left to the game
+    uint64_t pano_hd_ = 0, pano_kept_ = 0;
+public:
+    uint64_t hits_exact_ = 0, hits_shape_ = 0;  // sprites drawn in HD: exact key / recoloured shape
+private:  // panorama pixels replaced / left to the game
     uint32_t header_ = 0;
     std::unordered_map<uint64_t, unsigned> misses_;  // header << 32 | mode -> calls
+    struct RecentMiss {
+        uint32_t header;
+        int mode;
+        uint64_t key, shape;
+        uint8_t palette[0x100];
+    };
+    std::vector<RecentMiss> recent_;  // last ~200 misses
 };
 
 }  // namespace ki

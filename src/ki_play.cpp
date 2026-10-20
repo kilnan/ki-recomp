@@ -111,6 +111,14 @@ uint32_t pad_bits(SDL_GameController* pad) {
 constexpr double kFrameSeconds = 1.0 / (6.25e6 / (406.0 * 261.0));
 constexpr const char* kTitle = "Killer Instinct (recompiled)";
 
+void write_ppm_file(const std::string& path, const std::vector<uint8_t>& rgb, int w, int h) {
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+        std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+        std::fwrite(rgb.data(), 1, rgb.size(), f);
+        std::fclose(f);
+    }
+}
+
 std::string pref_path() {
     char* p = SDL_GetPrefPath("kilnan", "KIRecompiled");
     std::string s = p ? p : "./";
@@ -393,6 +401,23 @@ int main(int argc, char** argv) {
                                     ", stage " + (fight.stages.empty() ? "(game)" : std::to_string(fight.stages[0]));
                     SDL_SetWindowTitle(window, t.c_str());
                 }
+#ifdef KI_HAVE_HD
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_M && hd_texture) {
+                    // Diagnostics: the sprites recently drawn without HD, and the two pictures.
+                    std::string base = pref_path() + "hd_report";
+                    if (FILE* f = std::fopen((base + ".txt").c_str(), "w")) {
+                        hd.dump_recent_misses(f);
+                        std::fclose(f);
+                    }
+                    write_ppm_file(base + "_original.ppm", board.framebuffer_rgb(ctx), 320, 240);
+                    const std::vector<uint32_t>& px = hd.frame(ctx, board.displayed_bank());
+                    std::vector<uint8_t> rgb(px.size() * 3);
+                    for (size_t i = 0; i < px.size(); ++i)
+                        rgb[3 * i] = px[i] >> 16, rgb[3 * i + 1] = px[i] >> 8, rgb[3 * i + 2] = px[i];
+                    write_ppm_file(base + "_hd.ppm", rgb, ki::HdRenderer::kW, ki::HdRenderer::kH);
+                    SDL_SetWindowTitle(window, ("Killer Instinct (recompiled): report in " + base + ".txt").c_str());
+                }
+#endif
                 if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_R) {
                     // Reset: like switching the board off and on (same arguments).
                     save();

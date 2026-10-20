@@ -9,6 +9,10 @@ namespace ki::gen {
 void func_880107a8(ki::Context& c) {
     if (ki::hooks::sprite) ki::hooks::sprite(c);
     func_880107a8_original(c);
+    // The translation ends in tail calls (j to other parts of the blitter):
+    // finish them here, so the "after" hook sees the sprite drawn. The call
+    // site would run them next anyway.
+    ki::drain(c);
     if (ki::hooks::sprite_after) ki::hooks::sprite_after(c);
 }
 
@@ -17,6 +21,7 @@ void func_880107a8(ki::Context& c) {
 void func_88018c98(ki::Context& c) {
     if (ki::hooks::panorama) ki::hooks::panorama(c);
     func_88018c98_original(c);
+    ki::drain(c);
     if (ki::hooks::panorama_after) ki::hooks::panorama_after(c);
 }
 
@@ -24,6 +29,7 @@ void func_88018c98(ki::Context& c) {
 void func_88030b9c(ki::Context& c) {
     if (ki::hooks::prerendered) ki::hooks::prerendered(c);
     func_88030b9c_original(c);
+    ki::drain(c);
     if (ki::hooks::prerendered_after) ki::hooks::prerendered_after(c);
 }
 

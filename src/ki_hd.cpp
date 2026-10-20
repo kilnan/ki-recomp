@@ -244,29 +244,47 @@ HdRenderer::Image* HdRenderer::recoloured(const Context& c, Image& base) {
                 rgb(pal, n, ch) - apply(ch, rgb(base.palette.data(), n, 0), rgb(base.palette.data(), n, 1),
                                         rgb(base.palette.data(), n, 2))));
     const int w = base.w, ht = base.h;
-    auto d_at = [&](int x, int y, int ch) {
+    // Per HD pixel: of the (up to 4) original pixels around it, the entries
+    // whose original colour is closest to the HD pixel's colour decide the
+    // correction (weights by colour distance). The correction then follows the
+    // HD detail instead of the original pixel grid, which an interpolated
+    // correction map would show again when every entry changes (a tinted stage).
+    double bc[128][3], dv[128][3];
+    for (int n = 0; n < 128; ++n)
+        for (int ch = 0; ch < 3; ++ch) {
+            bc[n][ch] = rgb(base.palette.data(), n, ch);
+            dv[n][ch] = rgb(pal, n, ch) - bc[n][ch];
+        }
+    (void)delta;
+    auto entry = [&](int x, int y) {
         x = std::clamp(x, 0, w - 1), y = std::clamp(y, 0, ht - 1);
         uint8_t e = base.entries[static_cast<size_t>(y) * w + x];
-        return e == 0xff ? 0 : delta[e & 0x7f][ch];
+        return e == 0xff ? -1 : e & 0x7f;
     };
     for (int y = 0; y < v.ih; ++y) {
         float fy = (y + 0.5f) * ht / v.ih - 0.5f;
         int y0 = static_cast<int>(std::floor(fy));
-        float wy = fy - y0;
         for (int x = 0; x < v.iw; ++x) {
             uint32_t& px = v.argb[static_cast<size_t>(y) * v.iw + x];
             if (!(px >> 24)) continue;
             float fx = (x + 0.5f) * w / v.iw - 0.5f;
             int x0 = static_cast<int>(std::floor(fx));
-            float wx = fx - x0;
+            double c0[3] = {double((px >> 16) & 255), double((px >> 8) & 255), double(px & 255)};
+            double d[3] = {0, 0, 0}, wsum = 0;
+            const int es[4] = {entry(x0, y0), entry(x0 + 1, y0), entry(x0, y0 + 1), entry(x0 + 1, y0 + 1)};
+            for (int e : es) {
+                if (e < 0) continue;
+                double dist = 0;
+                for (int ch = 0; ch < 3; ++ch) dist += (c0[ch] - bc[e][ch]) * (c0[ch] - bc[e][ch]);
+                double wt = std::exp(-dist / (2 * 20.0 * 20.0)) + 1e-6;
+                for (int ch = 0; ch < 3; ++ch) d[ch] += wt * dv[e][ch];
+                wsum += wt;
+            }
+            if (wsum <= 0) continue;
             uint32_t out = px & 0xff000000u;
-            double r0 = (px >> 16) & 255, g0 = (px >> 8) & 255, b0 = px & 255;
             for (int ch = 0; ch < 3; ++ch) {
-                float d = (d_at(x0, y0, ch) * (1 - wx) + d_at(x0 + 1, y0, ch) * wx) * (1 - wy) +
-                          (d_at(x0, y0 + 1, ch) * (1 - wx) + d_at(x0 + 1, y0 + 1, ch) * wx) * wy;
-                int shift = 16 - 8 * ch;  // BGR555 bits 0-4 are red (ARGB bits 16-23), as argb_of
-                int val = static_cast<int>(std::lround(apply(ch, r0, g0, b0) + d));
-                out |= static_cast<uint32_t>(std::clamp(val, 0, 255)) << shift;
+                int val = static_cast<int>(std::lround(c0[ch] + d[ch] / wsum));
+                out |= static_cast<uint32_t>(std::clamp(val, 0, 255)) << (16 - 8 * ch);
             }
             px = out;
         }
@@ -328,28 +346,42 @@ void HdRenderer::invalidate(const Context& c, uint32_t bank) {
 void HdRenderer::draw(Bank& b, const Image& im, int x0, int y0, int x1, int y1, bool mirror) {
     b.hd_rects.push_back({std::clamp(x0, 0, 319), std::clamp(y0, 0, 239), std::clamp(x1, 0, 319), std::clamp(y1, 0, 239)});
     if (b.hd_rects.back().x0 > b.hd_rects.back().x1 || b.hd_rects.back().y0 > b.hd_rects.back().y1) b.hd_rects.pop_back();
-    // Maps the HD image onto original pixels x0..x1, y0..y1 (inclusive).
+    // Maps the HD image onto original pixels x0..x1, y0..y1 (inclusive),
+    // bilinearly: the game often draws fighters enlarged (the camera zooms in).
     int dx0 = x0 * kScale, dy0 = y0 * kScale, dw = (x1 - x0 + 1) * kScale, dh = (y1 - y0 + 1) * kScale;
+    const int iw = im.iw, ih = im.ih;
+    auto at = [&](int x, int y) { return im.argb[static_cast<size_t>(y) * iw + x]; };
     for (int y = 0; y < dh; ++y) {
         int ty = dy0 + y;
         if (ty < 0 || ty >= kH) continue;
-        int sy = std::min(im.ih - 1, y * im.ih / dh);
+        // Source position in 1/256 pixel.
+        int fy = std::max(0, ((2 * y + 1) * ih * 128) / dh - 128);
+        int sy0 = std::min(ih - 1, fy >> 8), sy1 = std::min(ih - 1, sy0 + 1), wy = fy & 255;
         for (int x = 0; x < dw; ++x) {
             int tx = dx0 + x;
             if (tx < 0 || tx >= kW) continue;
-            int sx = std::min(im.iw - 1, x * im.iw / dw);
-            if (mirror) sx = im.iw - 1 - sx;
-            uint32_t s = im.argb[static_cast<size_t>(sy) * im.iw + sx];
-            unsigned a = s >> 24;
+            int fx = std::max(0, ((2 * x + 1) * iw * 128) / dw - 128);
+            int sx0 = std::min(iw - 1, fx >> 8), sx1 = std::min(iw - 1, sx0 + 1), wx = fx & 255;
+            if (mirror) sx0 = iw - 1 - sx0, sx1 = iw - 1 - sx1;
+            uint32_t p00 = at(sx0, sy0), p01 = at(sx1, sy0), p10 = at(sx0, sy1), p11 = at(sx1, sy1);
+            // Premultiplied by alpha, so transparent neighbours do not darken the edge.
+            uint32_t acc[4] = {0, 0, 0, 0};
+            const uint32_t px[4] = {p00, p01, p10, p11};
+            const int wt[4] = {(256 - wx) * (256 - wy), wx * (256 - wy), (256 - wx) * wy, wx * wy};
+            for (int k = 0; k < 4; ++k) {
+                uint32_t a = px[k] >> 24;
+                acc[3] += a * wt[k];
+                for (int ch = 0; ch < 3; ++ch) acc[ch] += ((px[k] >> (16 - 8 * ch)) & 255) * a * wt[k];
+            }
+            unsigned a = acc[3] >> 16;
             if (!a) continue;
             uint32_t& d = b.hd[static_cast<size_t>(ty) * kW + tx];
-            if (a == 255) {
-                d = s;
-                continue;
-            }
             uint32_t out = 0xff000000u;
-            for (int sh = 0; sh < 24; sh += 8)
-                out |= ((((s >> sh) & 255) * a + ((d >> sh) & 255) * (255 - a)) / 255) << sh;
+            for (int ch = 0; ch < 3; ++ch) {
+                unsigned sc = static_cast<unsigned>(acc[ch] / acc[3]);  // un-premultiplied colour
+                unsigned dc = (d >> (16 - 8 * ch)) & 255;
+                out |= ((sc * a + dc * (255 - a)) / 255) << (16 - 8 * ch);
+            }
             d = out;
         }
     }
@@ -363,6 +395,9 @@ void HdRenderer::on_before(Context& c) {
         r.last_bank_ = r.bank_;
     }
     r.sync(c, r.bank_);
+    // The other one too: the footprint is then looked for in both, as on some
+    // stages the call does not draw where 0x88086200 says at this point.
+    r.sync(c, r.bank_ == 0x30000 ? 0x58000 : 0x30000);
     r.key_ = sprite_key(c);
     r.shape_ = sprite_shape_key(c);
     r.header_ = lo32(c.r[3]);
@@ -372,6 +407,7 @@ void HdRenderer::on_before(Context& c) {
     r.t3_ = static_cast<int32_t>(lo32(c.r[11]));
     r.t4_ = static_cast<int32_t>(lo32(c.r[12]));
     r.mode_ = static_cast<int32_t>(lo32(c.r[22]));
+    r.a0_ = static_cast<int32_t>(lo32(c.r[4]));
 }
 
 void HdRenderer::on_after(Context& c) {
@@ -381,16 +417,26 @@ void HdRenderer::on_after(Context& c) {
     Image* found = nullptr;
     if (it != r.pack_.end()) {
         found = &it->second;
+        ++r.hits_exact_;
     } else if (r.mode_ == 0) {  // another palette (costume, flash, lighting): recolour the shape's image
         auto sh = r.shapes_.find(r.shape_);
         if (sh != r.shapes_.end()) found = r.recoloured(c, sh->second);
+        if (found) ++r.hits_shape_;
     }
     if (!found) {
         ++r.misses_[static_cast<uint64_t>(r.header_) << 32 | static_cast<uint32_t>(r.mode_)];
+        RecentMiss m{r.header_, r.mode_, r.key_, r.shape_, {}};
+        std::memcpy(m.palette, &c.dram[0x90000], 0x100);
+        if (r.recent_.size() >= 200) r.recent_.erase(r.recent_.begin());
+        r.recent_.push_back(m);
         return;
     }
     Image& im = *found;
     if (!im.loaded) r.load(im);
+    static const bool trace = std::getenv("KI_HD_TRACE") != nullptr;
+    if (trace)
+        std::fprintf(stderr, "hd draw: header %08x mode %d scale %d/%d %s image %s %dx%d (original %dx%d)\n", r.header_, r.mode_,
+                     r.t1_, r.t3_, it != r.pack_.end() ? "exact" : "shape", im.file.c_str(), im.iw, im.ih, im.w, im.h);
     if (im.missing) return;
     // Where the whole sprite goes (it may be clipped): see TECHNICAL_NOTE "Sprite blitter".
     double sx = r.t1_ / 4096.0, sy = r.t3_ / 4096.0, X = r.s7_ / 256.0, Y = r.t8_ / 256.0;
@@ -401,15 +447,31 @@ void HdRenderer::on_after(Context& c) {
     int x1 = x0 + static_cast<int>(std::lround(im.w * sx)) - 1, y1 = y0 + static_cast<int>(std::lround(im.h * sy)) - 1;
     // The pixels this call changed (everything else was synced just before it),
     // looked for around the predicted rectangle.
+    static const int kSearch = std::getenv("KI_HD_SEARCH") ? std::atoi(std::getenv("KI_HD_SEARCH")) : 4;
+    int fx0 = 320, fy0 = 240, fx1 = -1, fy1 = -1;
+    for (uint32_t bank : {r.bank_, r.bank_ == 0x30000 ? 0x58000u : 0x30000u}) {
+        const Bank& bb = r.bank_of(bank);
+        const uint16_t* fb = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
+        for (int y = std::max(0, y0 - kSearch); y <= std::min(239, y1 + kSearch); ++y)
+            for (int x = std::max(0, x0 - kSearch); x <= std::min(319, x1 + kSearch); ++x)
+                if (fb[y * 320 + x] != bb.shadow[y * 320 + x]) {
+                    fx0 = std::min(fx0, x), fy0 = std::min(fy0, y), fx1 = std::max(fx1, x), fy1 = std::max(fy1, y);
+                }
+        if (fx1 >= 0) {
+            r.bank_ = bank;
+            break;
+        }
+    }
     Bank& b = r.bank_of(r.bank_);
     const uint16_t* lo = reinterpret_cast<const uint16_t*>(&c.sram[r.bank_]);
-    int fx0 = 320, fy0 = 240, fx1 = -1, fy1 = -1;
-    for (int y = std::max(0, y0 - 4); y <= std::min(239, y1 + 4); ++y)
-        for (int x = std::max(0, x0 - 4); x <= std::min(319, x1 + 4); ++x)
-            if (lo[y * 320 + x] != b.shadow[y * 320 + x]) {
-                fx0 = std::min(fx0, x), fy0 = std::min(fy0, y), fx1 = std::max(fx1, x), fy1 = std::max(fy1, y);
-            }
-    if (fx1 < 0) return;
+    if (trace && fx1 >= 0)
+        std::fprintf(stderr, "  footprint %d,%d-%d,%d predicted %d,%d-%d,%d a0 %d\n", fx0, fy0, fx1, fy1, x0, y0, x1, y1, r.a0_);
+    if (fx1 < 0) {
+        if (trace)
+            std::fprintf(stderr, "  no footprint: header %08x predicted %d,%d-%d,%d bank %05x (blitter target bit %d)\n", r.header_,
+                         x0, y0, x1, y1, r.bank_, c.dram[0x86200] & 1);
+        return;
+    }
     // Unclipped: the footprint itself is exact.
     bool clipped = fx0 == 0 || fy0 == 0 || fx1 == 319 || fy1 == 239;
     if (!clipped && std::abs((fx1 - fx0) - (x1 - x0)) <= 2 && std::abs((fy1 - fy0) - (y1 - y0)) <= 2)
@@ -421,6 +483,35 @@ void HdRenderer::on_after(Context& c) {
         std::memcpy(&b.shadow[y * 320 + fx0], lo + y * 320 + fx0, (fx1 - fx0 + 1) * 2);
     r.draw(b, im, x0, y0, x1, y1, mirror);
     ++r.hd_drawn_;
+    if (const char* snap = std::getenv("KI_HD_SNAP")) {  // debug: the HD copy right after this header's draw
+        static int n = 0;
+        if (std::strtoul(snap, nullptr, 16) == r.header_ && n < 40) {
+            char name[64];
+            std::snprintf(name, sizeof name, "hd_snap_%02d.ppm", n++);
+            if (FILE* f = std::fopen(name, "wb")) {
+                std::fprintf(f, "P6\n%d %d\n255\n", kW, kH);
+                for (uint32_t px : b.hd) {
+                    uint8_t rgb[3] = {uint8_t(px >> 16), uint8_t(px >> 8), uint8_t(px)};
+                    std::fwrite(rgb, 1, 3, f);
+                }
+                std::fclose(f);
+            }
+            std::fprintf(stderr, "snap %d: header %08x rect %d,%d-%d,%d footprint %d,%d-%d,%d bank %05x\n", n - 1, r.header_, x0, y0,
+                         x1, y1, fx0, fy0, fx1, fy1, r.bank_);
+        }
+    }
+}
+
+void HdRenderer::dump_recent_misses(FILE* f) {
+    std::fprintf(f, "pack: %zu keys, %zu shapes\n", pack_.size(), shapes_.size());
+    for (const RecentMiss& m : recent_) {
+        std::fprintf(f, "header %08x mode %d key %016llx shape %016llx%s palette ", m.header, m.mode,
+                     static_cast<unsigned long long>(m.key), static_cast<unsigned long long>(m.shape),
+                     shapes_.count(m.shape) ? " (shape known)" : "");
+        for (uint8_t b : m.palette) std::fprintf(f, "%02x", b);
+        std::fprintf(f, "\n");
+    }
+    recent_.clear();
 }
 
 void HdRenderer::print_misses(FILE* f) const {
