@@ -227,12 +227,35 @@ and checks that it loads only its own libraries.
 | key | action |
 |---|---|
 | P | pause (H still works, to compare) |
+| F6 / F7 | opponent / stage of the next fight: the game's, then each in turn (title bar) |
 | H | HD sprites on/off (with `--hd-pack DIR`) |
 | F5 | save the state (taken at the next frame) |
 | F9 | load the saved state |
 | F2 | test switch |
 | Tab | unthrottled (no sound while on) |
 | Esc | quit |
+
+### Choosing opponents and stages
+
+`ki_play --opponent orchid,eyedol --stage 10,1` sets the coming fights in turn:
+the first is against Orchid on stage 10, the second against Eyedol on stage 1,
+and so on. Opponents can be given by name or number:
+
+| Number | Character |
+|---|---|
+| 0 | jago |
+| 1 | combo |
+| 2 | spinal |
+| 3 | thunder |
+| 4 | glacius |
+| 5 | fulgore |
+| 6 | cinder |
+| 7 | sabrewulf |
+| 8 | orchid |
+| 9 | riptor |
+| 10 | eyedol |
+
+Stages are numbered 0–15. Of these, 6–9 are night variants of the rooftop and the game uses 6 for all four. The opponent applies to the fighter the game controls. In a two-player game only the stage is changed.
 
 ### Debugging against MAME
 - `build/ki_run --inputs FILE` replays a scripted session; generate one with

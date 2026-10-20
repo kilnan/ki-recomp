@@ -9,6 +9,7 @@ namespace ki {
 namespace hooks {
 Fn sprite = nullptr;
 Fn sprite_after = nullptr;
+Fn fight_setup = nullptr;
 }
 
 void raise_fault(Context&, Fault fault, uint32_t pc, uint32_t addr) {

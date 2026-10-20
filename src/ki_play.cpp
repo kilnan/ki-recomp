@@ -1,6 +1,6 @@
 // Plays the recompiled Killer Instinct program in a window (SDL2).
 //
-// usage: ki_play [--data <dir>] [--scale N] [--mute]
+// usage: ki_play [--data <dir>] [--scale N] [--mute] [--opponent NAMES] [--stage N,...]
 //        ki_play --boot <snapshot dir|rom> --disk <kinst.img> --rom <ki-l15d.u98>
 //                [--sound-roms <dir>] [--scale N] [--mute]      (development)
 //
@@ -21,6 +21,9 @@
 // Player 2: I J K L move, Q W E / T Y U attacks... see kKeys. F2 = service
 // (test switch), Esc quits, Tab toggles unthrottled speed (no sound while on).
 // Gamepads work too, see kPadButtons. F5 saves the state, F9 loads it.
+// P pauses. --opponent NAME[,NAME...] and --stage N[,N...] choose the coming
+// fights (in turn, one per fight); F6 / F7 cycle the opponent / stage of the
+// next fight (shown in the title bar).
 #include <SDL.h>
 
 #include <algorithm>
@@ -38,6 +41,7 @@
 #include "ki/kinst_board.h"
 #include "ki/runtime.h"
 #include "ki_boot.h"
+#include "ki_fight.h"
 #ifdef KI_HAVE_FILES
 #include "ki_files.h"
 #endif
@@ -161,6 +165,7 @@ std::vector<uint32_t> saved_lbas(const std::string& path) {
 
 int main(int argc, char** argv) {
     std::string boot, disk, rom, sound_roms, data, hd_pack;
+    static ki::FightChoice fight;
     int scale = 3;
     bool mute = false;
     for (int i = 1; i < argc; ++i) {
@@ -175,7 +180,15 @@ int main(int argc, char** argv) {
         else if (k == "--sound-roms") sound_roms = v;
         else if (k == "--data") data = v;
         else if (k == "--hd-pack") hd_pack = v;
+        else if (k == "--opponent" && !ki::parse_characters(v, fight.opponents)) {
+            std::fprintf(stderr, "--opponent: names or numbers 0-10 (jago combo spinal thunder glacius fulgore cinder sabrewulf orchid riptor eyedol)\n");
+            return 1;
+        } else if (k == "--stage" && !ki::parse_numbers(v, ki::kStageCount, fight.stages)) {
+            std::fprintf(stderr, "--stage: numbers 0-15\n");
+            return 1;
+        }
     }
+    ki::install_fight_choice(&fight);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -356,6 +369,21 @@ int main(int argc, char** argv) {
                     std::exit(0);
                 }
                 if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_TAB && !ev.key.repeat) turbo = !turbo;
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat &&
+                    (ev.key.keysym.scancode == SDL_SCANCODE_F6 || ev.key.keysym.scancode == SDL_SCANCODE_F7)) {
+                    // Next fight: off -> 0 -> 1 ... -> off. Replaces any --opponent / --stage list.
+                    bool opp = ev.key.keysym.scancode == SDL_SCANCODE_F6;
+                    std::vector<int>& list = opp ? fight.opponents : fight.stages;
+                    int limit = opp ? 11 : ki::kStageCount;
+                    int next = list.size() == 1 ? list[0] + 1 : 0;
+                    list.clear();
+                    if (next < limit) list.push_back(next);
+                    fight.fights = 0;
+                    std::string t = std::string(kTitle) + ": next fight: opponent " +
+                                    (fight.opponents.empty() ? "(game)" : ki::kCharacterNames[fight.opponents[0]]) +
+                                    ", stage " + (fight.stages.empty() ? "(game)" : std::to_string(fight.stages[0]));
+                    SDL_SetWindowTitle(window, t.c_str());
+                }
                 if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_P) {
                     paused = !paused;
                     if (audio) SDL_PauseAudioDevice(audio, paused ? 1 : 0);

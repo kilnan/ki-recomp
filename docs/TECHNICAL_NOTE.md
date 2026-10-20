@@ -789,6 +789,15 @@ there too; with 256 bytes there are 476 keys.
   mask, upscaled and smoothed. It writes `<image>.ki4` (zlib ARGB) and
   `index.txt` (key → image and placement).
 
+**Fight setup [O].**
+- 0x88000680 prepares a fight. It calls 0x8800e188, which loads the stage numbered by the byte at 0x88086238, using 16-byte entries at 0x8800e22c (destination, LBA, sectors).
+- It then calls 0x8800d7c8, which loads the two fighters: 0x8808f5f0 for player 1 and 0x8808f5f4 for player 2.
+  - The low byte is the character: 0 Jago, 1 Combo, 2 Spinal, 3 Thunder, 4 Glacius, 5 Fulgore, 6 Cinder, 7 Sabrewulf, 8 Orchid, 9 Riptor, 10 Eyedol.
+  - Bits 8–11 are the costume.
+  - 0x10000000 marks a fighter controlled by the game.
+- Stages 6–9 are variants of one stage; after loading, the setup stores 6.
+- The opponent order in a one-player game comes from the game's bytecode and has not been followed. Instead, `src/ki_fight.cpp` overrides 0x8800e188 (`hooks::fight_setup`) and rewrites the stage byte and the game-controlled fighter before anything is loaded.
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:

@@ -24,6 +24,7 @@
 #include "ki/kinst_board.h"
 #include "ki/runtime.h"
 #include "ki_boot.h"
+#include "ki_fight.h"
 #include "ki_sprites.h"
 #ifdef KI_HAVE_HD
 #include "ki_hd.h"
@@ -45,6 +46,7 @@ int main(int argc, char** argv) {
     std::string boot, disk, rom, out = ".", inputs, sound_roms, wav_out;
     static uint32_t dump_at = 0;
     static unsigned long dump_hit = 1;
+    static ki::FightChoice fight;
     static uint64_t board_frame = 0;  // the frame being run (for KI_MEM_PROBE)
     static uint64_t call_log_from = ~0ull;  // frame from which function entries are logged
     static std::vector<uint32_t> call_log;
@@ -95,6 +97,8 @@ int main(int argc, char** argv) {
                                   static_cast<uint32_t>(std::stoul(v.substr(c1 + 1, c2 - c1 - 1), nullptr, 16)), palettes);
         }
         else if (k == "--hd-pack") hd_pack = v;  // also write 4x frames (hd_frame_N.ppm) with this HD pack
+        else if (k == "--opponent") ki::parse_characters(v, fight.opponents);  // as ki_play
+        else if (k == "--stage") ki::parse_numbers(v, ki::kStageCount, fight.stages);
         else if (k == "--save-at") save_at = std::stoull(v);  // save-state test: save at frame N ...
         else if (k == "--load-at") load_at = std::stoull(v);  // ... and load it back at frame M (once)
         else if (k == "--dram-frames") {  // A-B: write DRAM at each VBLANK of frames A..B (dram_<frame>.bin)
@@ -330,6 +334,7 @@ int main(int argc, char** argv) {
     if (dcs) state.bind(board, dcs.get(), ki::read_sound_roms_or_die(sound_roms));
     else state.bind(board, nullptr, {});
     if (!sprite_dir.empty()) ki::start_sprite_extraction(sprite_dir);
+    if (!fight.opponents.empty() || !fight.stages.empty()) ki::install_fight_choice(&fight);
 #ifdef KI_MEM_PROBE
     // KI_MEM_PROBE=LO-HI[:FRAME]: accesses made by code in [LO, HI), per 1 KB page of address, during FRAME.
     if (const char* probe = std::getenv("KI_MEM_PROBE")) {
