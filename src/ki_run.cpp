@@ -23,6 +23,9 @@
 #include "ki/runtime.h"
 #include "ki_boot.h"
 #include "ki_sprites.h"
+#ifdef KI_HAVE_HD
+#include "ki_hd.h"
+#endif
 
 namespace {
 
@@ -48,7 +51,10 @@ int main(int argc, char** argv) {
     uint64_t frames = 600, dump_every = 60;
     static uint64_t dram_from = ~0ull, dram_to = 0;
     static uint64_t save_at = 0, load_at = 0, log_sprites = 0;
-    static std::string sprite_dir;
+    static std::string sprite_dir, hd_pack;
+#ifdef KI_HAVE_HD
+    static ki::HdRenderer hd;
+#endif
     static bool loaded_once = false;
     static ki::SaveState state;
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -72,6 +78,7 @@ int main(int argc, char** argv) {
         else if (k == "--wav-out") wav_out = v;
         else if (k == "--log-sprites") log_sprites = std::stoull(v);  // print the blitter calls of frame N
         else if (k == "--extract-sprites") sprite_dir = v;  // write each distinct sprite drawn to DIR
+        else if (k == "--hd-pack") hd_pack = v;  // also write 4x frames (hd_frame_N.ppm) with this HD pack
         else if (k == "--save-at") save_at = std::stoull(v);  // save-state test: save at frame N ...
         else if (k == "--load-at") load_at = std::stoull(v);  // ... and load it back at frame M (once)
         else if (k == "--dram-frames") {  // A-B: write DRAM at each VBLANK of frames A..B (dram_<frame>.bin)
@@ -167,6 +174,17 @@ int main(int argc, char** argv) {
             char name[64];
             std::snprintf(name, sizeof name, "/frame_%05llu.ppm", static_cast<unsigned long long>(frame));
             write_ppm(out + name, board.framebuffer_rgb(ctx));
+#ifdef KI_HAVE_HD
+            if (!hd_pack.empty()) {
+                const std::vector<uint32_t>& px = hd.frame(ctx, board.displayed_bank());
+                std::snprintf(name, sizeof name, "/hd_frame_%05llu.ppm", static_cast<unsigned long long>(frame));
+                if (FILE* f = std::fopen((out + name).c_str(), "wb")) {
+                    std::fprintf(f, "P6\n%d %d\n255\n", ki::HdRenderer::kW, ki::HdRenderer::kH);
+                    for (uint32_t p : px) { std::fputc((p >> 16) & 255, f); std::fputc((p >> 8) & 255, f); std::fputc(p & 255, f); }
+                    std::fclose(f);
+                }
+            }
+#endif
             double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             std::printf("frame %llu  cycles %llu  host %.2fs  ide cmds %llu  sectors %llu/%llu  unknown io %u\n",
                         static_cast<unsigned long long>(frame), static_cast<unsigned long long>(ctx.cycles), secs,
@@ -287,6 +305,12 @@ int main(int argc, char** argv) {
     if (dcs) state.bind(board, dcs.get(), ki::read_sound_roms_or_die(sound_roms));
     else state.bind(board, nullptr, {});
     if (!sprite_dir.empty()) ki::start_sprite_extraction(sprite_dir);
+#ifdef KI_HAVE_HD
+    if (!hd_pack.empty()) {
+        if (!hd.load_pack(hd_pack)) std::fprintf(stderr, "no HD pack in %s\n", hd_pack.c_str());
+        hd.attach();
+    }
+#endif
     ki::schedule(c);
     bool ran = false;
     for (;;) {

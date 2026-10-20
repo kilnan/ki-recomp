@@ -1,6 +1,7 @@
 #include "ki_sprites.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -64,13 +65,47 @@ Bbox bbox_of(const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
     return bb;
 }
 
+void probe_geometry(Context& c) {
+    // Draws the current sprite at one position with different scales and mirroring
+    // and prints the bounding boxes, to fit the blitter's placement rule.
+    const Context saved = c;
+    const uint8_t* hdr = &c.dram[lo32(c.r[3]) - 0x88000000u];
+    std::printf("geometry of %08x: hdr %d %d %d %d\n", lo32(c.r[3]), static_cast<int16_t>(hdr[0] | hdr[1] << 8),
+                static_cast<int16_t>(hdr[2] | hdr[3] << 8), static_cast<int16_t>(hdr[4] | hdr[5] << 8),
+                static_cast<int16_t>(hdr[6] | hdr[7] << 8));
+    struct Case { int32_t sx, sy, t4, s2; };
+    const Case cases[] = {{4096, 4096, 2, 640}, {8192, 4096, 2, 640}, {4096, 8192, 2, 640}, {2048, 2048, 2, 640},
+                          {4096, 4096, -2, 640}, {8192, 4096, -2, 640}, {4096, 4096, 2, -640}};
+    for (const Case& k : cases) {
+        Context args = saved;
+        args.r[9] = static_cast<uint64_t>(static_cast<int64_t>(k.sx));
+        args.r[11] = static_cast<uint64_t>(static_cast<int64_t>(k.sy));
+        args.r[12] = static_cast<uint64_t>(static_cast<int64_t>(k.t4));
+        args.r[18] = static_cast<uint64_t>(static_cast<int64_t>(k.s2));
+        args.r[28] = 0, args.r[30] = 240;
+        try {
+            auto a = draw_alone(c, args, 0x0000, 160 * 256, 120 * 256), b = draw_alone(c, args, 0x7fff, 160 * 256, 120 * 256);
+            Bbox bb = bbox_of(a, b);
+            std::printf("  sx %5d sy %5d t4 %2d s2 %4d -> x %d..%d y %d..%d\n", k.sx, k.sy, k.t4, k.s2, bb.x0, bb.x1, bb.y0, bb.y1);
+        } catch (const GuestFault&) {
+            std::printf("  sx %d sy %d t4 %d s2 %d -> fault\n", k.sx, k.sy, k.t4, k.s2);
+        }
+    }
+    c = saved;
+}
+
 void on_sprite(Context& c) {
     uint32_t h = lo32(c.r[3]);
     if (h - 0x88000000u >= c.dram.size() - 1024) return;
     const uint8_t* hdr = &c.dram[h - 0x88000000u];
     if (lo32(c.r[22]) == 48) return;  // mode 48: the squashed dark shadow of a sprite drawn normally too
-    // Same data and same palette (zero page, which the caller fills for each sprite) = same image.
-    uint64_t key = fnv(&c.dram[0x90000], 0x1000, fnv(hdr, 512));
+    static int probes = std::getenv("KI_SPRITE_GEOMETRY") ? 3 : 0;
+    const uint8_t* ph = &c.dram[h - 0x88000000u];
+    if (probes > 0 && lo32(c.r[22]) == 0 && static_cast<int16_t>(ph[6] | ph[7] << 8) > 60) {
+        --probes;
+        probe_geometry(c);
+    }
+    uint64_t key = sprite_key(c);
     if (!g_seen_keys.insert(key).second) return;
 
     const Context saved = c;  // the extra draws must leave no trace
@@ -83,11 +118,12 @@ void on_sprite(Context& c) {
     args.r[30] = 240;                 // s8: clip bottom
     // Positions are in 1/256 pixel. Draw at the centre, then move the sprite
     // so that its bounding box starts at (8, 8).
-    int32_t x = 160 * 256, y = 120 * 256;
+    int32_t x = 160 * 256, y = 120 * 256, drawn_x = x, drawn_y = y;
     std::vector<uint16_t> a, b;
     Bbox bb;
     try {
         for (int pass = 0; pass < 2; ++pass) {
+            drawn_x = x, drawn_y = y;
             a = draw_alone(c, args, 0x0000, x, y);
             b = draw_alone(c, args, 0x7fff, x, y);
             bb = bbox_of(a, b);
@@ -117,6 +153,13 @@ void on_sprite(Context& c) {
             }
         }
     uint64_t image = fnv(rgb.data(), rgb.size(), static_cast<uint64_t>(w) << 32 | static_cast<uint32_t>(ht));
+    // Where the image sits relative to the anchor (s7, t8) at scale 1, in pixels.
+    int ox = bb.x0 - drawn_x / 256, oy = bb.y0 - drawn_y / 256;
+    if (FILE* f = std::fopen((g_dir + "/keys.txt").c_str(), "a")) {
+        std::fprintf(f, "%016llx %016llx %d %d %d %d\n", static_cast<unsigned long long>(key),
+                     static_cast<unsigned long long>(image), ox, oy, w, ht);
+        std::fclose(f);
+    }
     if (!g_seen_images.insert(image).second) return;
     char name[64];
     std::snprintf(name, sizeof name, "/%016llx.ppm", static_cast<unsigned long long>(image));
@@ -135,6 +178,15 @@ void on_sprite(Context& c) {
 }
 
 }  // namespace
+
+uint64_t sprite_key(const Context& c) {
+    uint32_t h = lo32(c.r[3]);
+    if (h - 0x88000000u >= c.dram.size() - 1024) return 0;
+    // Same data and same palette = same image. Pixels are bytes used as zero-page
+    // addresses of halfwords (0x88010f50: lbu; lh 0(reg)), so the palette is the
+    // zero page's first 256 bytes; the rest of the page holds other variables.
+    return fnv(&c.dram[0x90000], 0x100, fnv(&c.dram[h - 0x88000000u], 512));
+}
 
 void start_sprite_extraction(const std::string& dir) {
     g_dir = dir;

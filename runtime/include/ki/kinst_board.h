@@ -41,6 +41,8 @@ public:
     std::function<void(Context&, uint64_t frame)> on_vblank;
     // Displayed framebuffer as RGB888, 320 x 240 (MAME screen_update).
     std::vector<uint8_t> framebuffer_rgb(const Context& c) const;
+    // SRAM offset of the framebuffer being displayed (0x30000 or 0x58000).
+    uint32_t displayed_bank() const { return (vram_control_ & 4) ? 0x58000 : 0x30000; }
 
     // Sound board (optional; without it the DCS reads as always ready and is silent).
     // The DSP runs at 10 MHz, one tenth of the CPU clock.

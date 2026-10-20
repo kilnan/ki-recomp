@@ -41,6 +41,9 @@
 #ifdef KI_HAVE_FILES
 #include "ki_files.h"
 #endif
+#ifdef KI_HAVE_HD
+#include "ki_hd.h"
+#endif
 
 namespace {
 
@@ -157,7 +160,7 @@ std::vector<uint32_t> saved_lbas(const std::string& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string boot, disk, rom, sound_roms, data;
+    std::string boot, disk, rom, sound_roms, data, hd_pack;
     int scale = 3;
     bool mute = false;
     for (int i = 1; i < argc; ++i) {
@@ -171,6 +174,7 @@ int main(int argc, char** argv) {
         else if (k == "--scale") scale = std::stoi(v);
         else if (k == "--sound-roms") sound_roms = v;
         else if (k == "--data") data = v;
+        else if (k == "--hd-pack") hd_pack = v;
     }
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -182,6 +186,7 @@ int main(int argc, char** argv) {
     SDL_RenderSetLogicalSize(renderer, 320, 240);
     SDL_Texture* texture =
         SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 320, 240);
+    SDL_Texture* hd_texture = nullptr;  // 4x picture when an HD pack is loaded (H toggles)
 
     // ---- the game's files ----
     std::vector<uint8_t> disk_image, boot_rom;
@@ -285,6 +290,21 @@ int main(int argc, char** argv) {
         }
     }
 
+#ifdef KI_HAVE_HD
+    static ki::HdRenderer hd;
+    bool hd_on = false;
+    if (!hd_pack.empty()) {
+        if (hd.load_pack(hd_pack)) {
+            hd.attach();
+            hd_on = true;
+            hd_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                                           ki::HdRenderer::kW, ki::HdRenderer::kH);
+            std::fprintf(stderr, "HD pack: %zu sprites (H switches HD on and off)\n", hd.pack_size());
+        } else {
+            std::fprintf(stderr, "no HD pack in %s\n", hd_pack.c_str());
+        }
+    }
+#endif
     static ki::SaveState state;  // F5 / F9
     state.bind(board, dcs.get(), sound);
 
@@ -308,6 +328,10 @@ int main(int argc, char** argv) {
                 std::exit(0);
             }
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_TAB && !ev.key.repeat) turbo = !turbo;
+#ifdef KI_HAVE_HD
+            if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_H && hd_texture)
+                hd_on = !hd_on;
+#endif
             if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F5)
                 state.request(ctx);  // taken at the next dispatcher entry
             if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F9 && state.valid())
@@ -351,10 +375,23 @@ int main(int argc, char** argv) {
             pcm.clear();
         }
         if (!turbo || frame % 8 == 0) {
-            auto rgb = board.framebuffer_rgb(ctx);
-            SDL_UpdateTexture(texture, nullptr, rgb.data(), 320 * 3);
             SDL_RenderClear(renderer);
-            SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+#ifdef KI_HAVE_HD
+            // The HD copy is kept up to date even when not shown, so H switches instantly.
+            if (hd_texture) {
+                const std::vector<uint32_t>& px = hd.frame(ctx, board.displayed_bank());
+                if (hd_on) {
+                    SDL_UpdateTexture(hd_texture, nullptr, px.data(), ki::HdRenderer::kW * 4);
+                    SDL_RenderCopy(renderer, hd_texture, nullptr, nullptr);
+                }
+            }
+            if (!hd_on)
+#endif
+            {
+                auto rgb = board.framebuffer_rgb(ctx);
+                SDL_UpdateTexture(texture, nullptr, rgb.data(), 320 * 3);
+                SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+            }
             SDL_RenderPresent(renderer);
         }
         if (!turbo) {

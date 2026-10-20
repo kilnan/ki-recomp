@@ -725,6 +725,48 @@ pixel format does not need to be decoded.
   identical to a run without extraction. The images are local game data and
   are not committed.
 
+**Placement [O].** Measured by redrawing a sprite at known positions,
+scales and mirroring. X = s7/256, Y = t8/256, sx = t1/4096, sy = t3/4096.
+- **Horizontal:** the left edge is X − h0·sx − 1; mirrored, the right edge is
+  X + h0·sx + 1.
+- **Vertical:** the bottom edge is Y + h2·sy (the anchor is at the feet).
+
+This was checked at scales 0.5, 1 and 2. A negative pitch (vertical flip, used
+by shadows) faults with a full-screen clip window and was not measured.
+
+**Sprite key.** The key is FNV of the header and the first 512 data bytes
+plus the palette. The palette is the zero page's first 256 bytes: pixels are
+bytes used as zero-page addresses of halfwords (0x88010f50). Keying on the
+whole zero page made 1,933 keys for 456 images, because other variables live
+there too; with 256 bytes there are 476 keys.
+
+**HD rendering** (`src/ki_hd.cpp`; `ki_play --hd-pack DIR`, H toggles,
+`ki_run --hd-pack DIR` writes `hd_frame_N.ppm`).
+- **Copies.** For each framebuffer a 4x copy and a shadow of the original
+  pixels are kept.
+- **Before each blitter call**, every pixel that changed since the last sync is
+  upscaled bilinearly into the copy (stages, shadows, effects, HUD parts
+  without HD).
+- **After the call**, if the sprite is in the pack, its HD image is drawn over
+  the area the call changed. That footprint is searched around the predicted
+  rectangle. When unclipped, the footprint itself is used, so no rounding has
+  to be guessed.
+- **At VBLANK** the displayed copy is synced and shown.
+- **Cost:** about 5 ms per frame on an M-series core.
+
+**Pack** (`tools/hd/`).
+- `prepare.py` spreads each sprite's colours into its transparent area, so
+  that no dark fringe is upscaled, and puts it on a 160 or 320 square canvas.
+  A whole bucket then goes through the upscaler in one run at exactly 4x.
+- The upscaling chosen after comparing on extracted sprites is SeedVR2 7B
+  sharp, one image at a time. AnimeSharp was the most temporally stable (frame
+  difference 6.70 against 6.33 for the original), but looks close to bilinear.
+  SeedVR2 is 7.38, sharper, with invented fine texture. Run as a video, it
+  ghosts between poses, and Real-ESRGAN anime changes the style.
+- `pack.py` crops the upscaled canvases and takes alpha from the original
+  mask, upscaled and smoothed. It writes `<image>.ki4` (zlib ARGB) and
+  `index.txt` (key → image and placement).
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:
