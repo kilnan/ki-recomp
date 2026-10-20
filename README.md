@@ -236,6 +236,13 @@ and checks that it loads only its own libraries.
 | Tab | unthrottled (no sound while on) |
 | Esc | quit |
 
+### HD sprites and stages
+
+`ki_play --hd-pack DIR` draws the game with upscaled sprites and stages. How a
+pack is made (extraction, SeedVR2 upscaling, packing) and what is done so far:
+[docs/HD_PIPELINE.md](docs/HD_PIPELINE.md). Packs are derived from the game
+and are not distributed.
+
 ### Choosing opponents and stages
 
 `ki_play --opponent orchid,eyedol --stage 10,1` sets the coming fights in turn:
