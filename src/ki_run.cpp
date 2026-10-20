@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     uint64_t frames = 600, dump_every = 60;
     static uint64_t dram_from = ~0ull, dram_to = 0;
     static uint64_t save_at = 0, load_at = 0, log_sprites = 0;
-    static std::string sprite_dir, hd_pack;
+    static std::string sprite_dir, hd_pack, screen_dir;
 #ifdef KI_HAVE_HD
     static ki::HdRenderer hd;
 #endif
@@ -97,6 +97,7 @@ int main(int argc, char** argv) {
                                   static_cast<uint32_t>(std::stoul(v.substr(c1 + 1, c2 - c1 - 1), nullptr, 16)), palettes);
         }
         else if (k == "--hd-pack") hd_pack = v;  // also write 4x frames (hd_frame_N.ppm) with this HD pack
+        else if (k == "--dump-screens") screen_dir = v;  // with --hd-pack: full-screen pictures from 0x884a0000
         else if (k == "--opponent") ki::parse_characters(v, fight.opponents);  // as ki_play
         else if (k == "--stage") ki::parse_numbers(v, ki::kStageCount, fight.stages);
         else if (k == "--save-at") save_at = std::stoull(v);  // save-state test: save at frame N ...
@@ -397,6 +398,7 @@ int main(int argc, char** argv) {
 #ifdef KI_HAVE_HD
     if (!hd_pack.empty()) {
         if (!hd.load_pack(hd_pack)) std::fprintf(stderr, "no HD pack in %s\n", hd_pack.c_str());
+        hd.screen_dump_dir = screen_dir;
         hd.attach();
     }
 #endif

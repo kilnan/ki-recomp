@@ -88,6 +88,17 @@ private:
     std::unordered_map<uint64_t, Prerendered> prerendered_;  // key: FNV of frame 0's first 8 rows
     uint32_t pre_dest_ = 0;
     uint64_t pre_blocks_hd_ = 0, pre_blocks_kept_ = 0;
+    static void on_screen_save(Context& c);
+    static void on_screen_restore(Context& c);
+    void put_saved_screen(const Context& c);
+    std::vector<uint32_t> saved_screen_;  // HD of the darkened frame saved at 0x884a0000
+    // Full-screen pictures copied from 0x884a0000 (screens.txt: key of the
+    // 320x240 picture -> screen_<key>.ki4), e.g. the winner portraits.
+    std::unordered_map<uint64_t, std::string> screens_;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> screen_cache_;
+public:
+    std::string screen_dump_dir;  // ki_run: write each new picture copied from 0x884a0000 here
+private:
     static void on_panorama(Context& c);
     static void on_panorama_after(Context& c);
     bool load_panorama(Panorama& p);

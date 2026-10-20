@@ -32,5 +32,11 @@ extern Fn panorama_after;
 // a pixel that grows with the block's depth (parallax). Entry and after.
 extern Fn prerendered;
 extern Fn prerendered_after;
+// End-of-fight screens: 0x88023008 saves the shown frame darkened (half
+// brightness) at 0x884a0000 and copies it into the target framebuffer
+// (pointer at 0x88040dc8); 0x8802309c copies the saved frame there again.
+// Called after each.
+extern Fn screen_save_after;
+extern Fn screen_restore_after;
 
 }  // namespace ki::hooks

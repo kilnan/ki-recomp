@@ -34,3 +34,20 @@ void func_88030b9c(ki::Context& c) {
 }
 
 }  // namespace ki::gen
+
+namespace ki::gen {
+
+// The end-of-fight screen (saved, darkened frame under the text).
+void func_88023008(ki::Context& c) {
+    func_88023008_original(c);
+    ki::drain(c);
+    if (ki::hooks::screen_save_after) ki::hooks::screen_save_after(c);
+}
+
+void func_8802309c(ki::Context& c) {
+    func_8802309c_original(c);
+    ki::drain(c);
+    if (ki::hooks::screen_restore_after) ki::hooks::screen_restore_after(c);
+}
+
+}  // namespace ki::gen

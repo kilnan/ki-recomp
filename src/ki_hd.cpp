@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 #include <miniz.h>
@@ -66,6 +67,12 @@ bool HdRenderer::load_pack(const std::string& dir) {
         stage.tried.assign(stage.frames, false);
         prerendered_[std::stoull(key, nullptr, 16)] = stage;
     }
+    std::ifstream sc(dir + "/screens.txt");
+    while (std::getline(sc, line)) {
+        std::istringstream ls(line);
+        std::string key;
+        if (ls >> key) screens_[std::stoull(key, nullptr, 16)] = dir + "/screen_" + key + ".ki4";
+    }
     std::ifstream sh(dir + "/shapes.txt");
     while (std::getline(sh, line)) {
         std::istringstream ls(line);
@@ -76,7 +83,7 @@ bool HdRenderer::load_pack(const std::string& dir) {
         im.kix_file = dir + "/" + image + ".kix";
         shapes_[std::stoull(key, nullptr, 16)] = im;
     }
-    return !pack_.empty() || !panoramas_.empty() || !prerendered_.empty();
+    return !pack_.empty() || !panoramas_.empty() || !prerendered_.empty() || !screens_.empty();
 }
 
 void HdRenderer::attach() {
@@ -85,6 +92,8 @@ void HdRenderer::attach() {
     hooks::sprite_after = on_after;
     hooks::panorama = on_panorama;
     hooks::panorama_after = on_panorama_after;
+    hooks::screen_save_after = on_screen_save;
+    hooks::screen_restore_after = on_screen_restore;
     // Pre-rendered stages (off with KI_HD_PRERENDERED=0); see TECHNICAL_NOTE.
     const char* pre = std::getenv("KI_HD_PRERENDERED");
     if (!pre || std::strcmp(pre, "0") != 0) {
@@ -98,6 +107,8 @@ void HdRenderer::detach() {
     hooks::sprite_after = nullptr;
     hooks::panorama = nullptr;
     hooks::panorama_after = nullptr;
+    hooks::screen_save_after = nullptr;
+    hooks::screen_restore_after = nullptr;
     hooks::prerendered = nullptr;
     hooks::prerendered_after = nullptr;
     g_hd = nullptr;
@@ -785,6 +796,67 @@ void HdRenderer::on_prerendered_after(Context& c) {
                 std::memset(&b.owned[y * 320 + bx * 8], 1, 8);
             }
         }
+}
+
+void HdRenderer::on_screen_save(Context& c) {
+    // The source is the other framebuffer than the target (the frame shown).
+    HdRenderer& r = *g_hd;
+    uint32_t target = (c.dram[0x40dc8] | c.dram[0x40dc9] << 8 | c.dram[0x40dca] << 16 |
+                       static_cast<uint32_t>(c.dram[0x40dcb]) << 24) & 0x1fffffffu;
+    if (target != 0x30000 && target != 0x58000) return;
+    uint32_t source = target == 0x30000 ? 0x58000 : 0x30000;
+    r.sync(c, source);
+    const std::vector<uint32_t>& hd = r.bank_of(source).hd;
+    r.saved_screen_.resize(hd.size());
+    for (size_t i = 0; i < hd.size(); ++i) r.saved_screen_[i] = 0xff000000u | ((hd[i] >> 1) & 0x7f7f7f);  // half, as 0x7bde mask + shift
+    r.put_saved_screen(c);
+}
+
+void HdRenderer::on_screen_restore(Context& c) {
+    // 0x884a0000 holds either the saved frame or a picture read from disk
+    // (0x8802dc40 reads the drive into it): a picture in the pack wins.
+    HdRenderer& r = *g_hd;
+    const uint8_t* pic = &c.dram[0x4a0000];
+    uint64_t key = 1469598103934665603ull;
+    for (int i = 0; i < 320 * 240 * 2; ++i) key = (key ^ pic[i]) * 1099511628211ull;
+    if (!r.screen_dump_dir.empty()) {
+        static std::set<uint64_t> seen;
+        if (seen.insert(key).second) {
+            char name[96];
+            std::snprintf(name, sizeof name, "/screen_%016llx.raw", static_cast<unsigned long long>(key));
+            if (FILE* f = std::fopen((r.screen_dump_dir + name).c_str(), "wb")) {
+                std::fwrite(pic, 1, 320 * 240 * 2, f);
+                std::fclose(f);
+            }
+        }
+    }
+    auto it = r.screens_.find(key);
+    if (it != r.screens_.end()) {
+        auto& hd = r.screen_cache_[key];
+        if (hd.empty()) {
+            Image im;
+            im.file = it->second;
+            if (r.load(im), !im.missing && im.iw == kW && im.ih == kH) hd = std::move(im.argb);
+        }
+        if (!hd.empty()) {
+            r.saved_screen_ = hd;
+            r.put_saved_screen(c);
+            return;
+        }
+    }
+    r.put_saved_screen(c);
+}
+
+void HdRenderer::put_saved_screen(const Context& c) {
+    if (saved_screen_.empty()) return;
+    uint32_t target = (c.dram[0x40dc8] | c.dram[0x40dc9] << 8 | c.dram[0x40dca] << 16 |
+                       static_cast<uint32_t>(c.dram[0x40dcb]) << 24) & 0x1fffffffu;
+    if (target != 0x30000 && target != 0x58000) return;
+    Bank& b = bank_of(target);
+    b.hd = saved_screen_;
+    std::memcpy(b.shadow.data(), &c.sram[target], 320 * 240 * 2);
+    std::fill(b.owned.begin(), b.owned.end(), 1);
+    b.hd_rects.clear();
 }
 
 const std::vector<uint32_t>& HdRenderer::frame(const Context& c, uint32_t bank) {

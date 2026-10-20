@@ -14,6 +14,8 @@ Fn panorama = nullptr;
 Fn panorama_after = nullptr;
 Fn prerendered = nullptr;
 Fn prerendered_after = nullptr;
+Fn screen_save_after = nullptr;
+Fn screen_restore_after = nullptr;
 }
 
 void raise_fault(Context&, Fault fault, uint32_t pc, uint32_t addr) {
