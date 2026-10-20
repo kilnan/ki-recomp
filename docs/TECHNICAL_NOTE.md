@@ -812,8 +812,8 @@ there too; with 256 bytes there are 476 keys.
 - The 8 frames are upscaled once.
 - After each call of the renderer, the player finds the frame from a few blocks. For each block it then finds the shift, in eighths, that reproduces the drawn pixels from the original frame in DRAM.
 - It samples the HD frame with that shift, which is 4x finer in HD.
-- Blocks that do not match stay the game's. On Cinder's stage, 72% of the blocks become HD.
-- The search costs about 3 ms per frame. Decoding the shift from the renderer's registers would remove it.
+- **Experimental, off by default** (`KI_HD_PRERENDERED=1`). The model reproduces only some camera positions: in a fight on stage 1, between 1% and 73% of the blocks match per frame. A frame is used only if 90% match.
+- Between angles the renderer evidently does more, presumably mixing two frames. The next step is to decode its parameters (the table at s7, k1 and v0 at 0x88030b40) instead of fitting.
 
 **HD panoramas** (`tools/hd/panorama.py`, `panoramas.txt` in a pack).
 - **Upscale.** The layers are read from the stage file on disk, without billboards, and upscaled once with columns wrapped on both sides.

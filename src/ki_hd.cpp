@@ -85,8 +85,12 @@ void HdRenderer::attach() {
     hooks::sprite_after = on_after;
     hooks::panorama = on_panorama;
     hooks::panorama_after = on_panorama_after;
-    hooks::prerendered = on_prerendered;
-    hooks::prerendered_after = on_prerendered_after;
+    // Pre-rendered stages: experimental (KI_HD_PRERENDERED=1). The block shift
+    // model reproduces only some camera positions; see TECHNICAL_NOTE.
+    if (std::getenv("KI_HD_PRERENDERED")) {
+        hooks::prerendered = on_prerendered;
+        hooks::prerendered_after = on_prerendered_after;
+    }
 }
 
 void HdRenderer::detach() {
@@ -514,6 +518,8 @@ void HdRenderer::on_panorama_after(Context& c) {
     }
 }
 
+constexpr int kNoMatch = 1 << 20;
+
 void HdRenderer::on_prerendered(Context& c) { g_hd->pre_dest_ = lo32(c.r[26]); }  // k0: the framebuffer
 
 void HdRenderer::on_prerendered_after(Context& c) {
@@ -581,11 +587,13 @@ void HdRenderer::on_prerendered_after(Context& c) {
     }
     if (st.hd[frame].empty()) return;
     const std::vector<uint32_t>& hd = st.hd[frame];
-    Bank& b = r.bank_of(bank);
-    int last_shift = 0;
+    // First every block's shift; the HD frame is used only if nearly all blocks
+    // match (between two camera angles the renderer does something this model
+    // does not cover, and a mix of matched and unmatched blocks looks broken).
+    int shifts[30][40];
+    int matched = 0, last_shift = 0;
     for (int by = 0; by < 30; ++by)
         for (int bx = 0; bx < 40; ++bx) {
-            // Search around the previous block's shift first (neighbours have similar depth).
             int best = 1 << 30, best_s = 0;
             for (int s8 = -40; s8 <= 40; ++s8) {
                 int e = block_error(frame, bx, by, s8);
@@ -593,12 +601,27 @@ void HdRenderer::on_prerendered_after(Context& c) {
                 if (best == 0) break;
             }
             // Mostly exact; a few rounding differences per block are fine.
-            if (best > 64 * 3 * 8 * 2) {
-                ++r.pre_blocks_kept_;
-                continue;
+            static const int limit = std::getenv("KI_PRE_LIMIT") ? std::atoi(std::getenv("KI_PRE_LIMIT")) : 64 * 3 * 8 / 2;
+            shifts[by][bx] = best <= limit ? best_s : kNoMatch;
+            if (shifts[by][bx] != kNoMatch) ++matched, last_shift = best_s;
+        }
+    if (std::getenv("KI_HD_DEBUG")) {
+        static int calls = 0;
+        if (++calls % 50 == 0) std::fprintf(stderr, "pre-rendered: frame %d, %d/1200 blocks match\n", frame, matched);
+    }
+    if (matched < 1200 * 9 / 10) {
+        r.pre_blocks_kept_ += 1200;
+        return;
+    }
+    Bank& b = r.bank_of(bank);
+    for (int by = 0; by < 30; ++by)
+        for (int bx = 0; bx < 40; ++bx) {
+            int best_s = shifts[by][bx];
+            if (best_s == kNoMatch) {
+                // Inside a matched frame: the neighbour's shift (same depth, usually a flat area).
+                best_s = bx > 0 && shifts[by][bx - 1] != kNoMatch ? shifts[by][bx - 1] : 0;
             }
             ++r.pre_blocks_hd_;
-            last_shift = best_s;
             // In HD the shift is 4x finer: s/8 original pixel = s/2 HD pixel.
             for (int y = 0; y < 8 * kScale; ++y) {
                 int hy = by * 8 * kScale + y;
