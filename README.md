@@ -212,20 +212,23 @@ and checks that it loads only its own libraries.
 | 2 | start |
 | 6 | coin |
 
-**Gamepads** (Xbox layout; first pad = player 1, second = player 2)
+**Gamepads** (default: Xbox layout; first pad = player 1, second = player 2;
+**G** opens the setup screen to see which pads are connected, test them and
+rebind any input; bindings are saved in `pad_map.txt` in the preferences folder)
 
 | button | action |
 |---|---|
 | d-pad / left stick | move |
 | X / Y / RB | high attack: quick, medium, fierce |
 | A / B / RT | low attack: quick, medium, fierce |
-| Start | start |
-| Back | coin |
+| Start (Nimbus: Menu) | start |
+| Back or LB | coin (LB for pads without Back, like the SteelSeries Nimbus) |
 
 **Other keys**
 
 | key | action |
 |---|---|
+| G | controller setup: connected pads, live test, rebind every input (saved) |
 | P | pause (H still works, to compare) |
 | R | reset (restarts like switching the board off and on) |
 | F6 / F7 | opponent / stage of the next fight: the game's, then each in turn (title bar; on a Mac keyboard hold Fn) |

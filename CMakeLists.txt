@@ -239,7 +239,7 @@ if(KI_BUILD_FULL)
   # Windowed player: needs SDL2 (on macOS: brew install sdl2-compat or sdl2).
   find_package(SDL2 CONFIG QUIET)
   if(SDL2_FOUND)
-    add_executable(ki_play src/ki_play.cpp)
+    add_executable(ki_play src/ki_play.cpp src/ki_pad.cpp src/ki_pad_ui.cpp)
     target_link_libraries(ki_play PRIVATE ki_boot ki_full_code SDL2::SDL2)
     if(KI_WITH_CHD)
       target_link_libraries(ki_play PRIVATE ki_files ki_hd)

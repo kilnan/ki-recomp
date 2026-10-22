@@ -20,7 +20,8 @@
 // Z X C = low quick/medium/fierce, 1 = start, 5 = coin.
 // Player 2: I J K L move, Q W E / T Y U attacks... see kKeys. F2 = service
 // (test switch), Esc quits, Tab toggles unthrottled speed (no sound while on).
-// Gamepads work too, see kPadButtons. F5 saves the state, F9 loads it.
+// Gamepads work too (Xbox layout by default, see ki_pad.cpp); G opens the
+// controller setup screen. F5 saves the state, F9 loads it.
 // P pauses, R resets. --opponent NAME[,NAME...] and --stage N[,N...] choose the coming
 // fights (in turn, one per fight); F6 / F7 cycle the opponent / stage of the
 // next fight (shown in the title bar).
@@ -48,6 +49,8 @@
 #include "ki/runtime.h"
 #include "ki_boot.h"
 #include "ki_fight.h"
+#include "ki_pad.h"
+#include "ki_pad_ui.h"
 #ifdef KI_HAVE_FILES
 #include "ki_files.h"
 #endif
@@ -75,38 +78,6 @@ const KeyBit kKeys[] = {
     {SDL_SCANCODE_I, 2, 0x040},     {SDL_SCANCODE_K, 2, 0x080},     {SDL_SCANCODE_J, 2, 0x100},
     {SDL_SCANCODE_L, 2, 0x200},     {SDL_SCANCODE_2, 2, 0x400},     {SDL_SCANCODE_6, 2, 0x800},
 };
-
-// Gamepads (SDL GameController, Xbox layout): the first pad is player 1, the
-// second player 2. Top row X Y RB = high quick/medium/fierce, bottom row
-// A B RT = low quick/medium/fierce; d-pad or left stick moves; Start = start,
-// Back = coin.
-struct PadBit {
-    SDL_GameControllerButton button;
-    uint32_t bit;
-};
-const PadBit kPadButtons[] = {
-    {SDL_CONTROLLER_BUTTON_X, 0x001},          {SDL_CONTROLLER_BUTTON_Y, 0x002},
-    {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0x004}, {SDL_CONTROLLER_BUTTON_A, 0x008},
-    {SDL_CONTROLLER_BUTTON_B, 0x010},          {SDL_CONTROLLER_BUTTON_DPAD_UP, 0x040},
-    {SDL_CONTROLLER_BUTTON_DPAD_DOWN, 0x080},  {SDL_CONTROLLER_BUTTON_DPAD_LEFT, 0x100},
-    {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 0x200}, {SDL_CONTROLLER_BUTTON_START, 0x400},
-    {SDL_CONTROLLER_BUTTON_BACK, 0x800},
-};
-
-uint32_t pad_bits(SDL_GameController* pad) {
-    uint32_t bits = 0;
-    for (const PadBit& b : kPadButtons)
-        if (SDL_GameControllerGetButton(pad, b.button)) bits |= b.bit;
-    if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000) bits |= 0x020;
-    const int dead = 16000;
-    int x = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
-    int y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
-    if (y < -dead) bits |= 0x040;
-    if (y > dead) bits |= 0x080;
-    if (x < -dead) bits |= 0x100;
-    if (x > dead) bits |= 0x200;
-    return bits;
-}
 
 constexpr double kFrameSeconds = 1.0 / (6.25e6 / (406.0 * 261.0));
 constexpr const char* kTitle = "Killer Instinct (recompiled)";
@@ -350,6 +321,9 @@ int main(int argc, char** argv) {
     };
     auto next_frame = std::chrono::steady_clock::now();
     bool paused = false;
+    // Controller bindings: G opens the setup screen (game paused meanwhile).
+    static std::vector<ki::pad::Action> pad_actions = ki::pad::load_bindings(pref_path() + "pad_map.txt");
+    static ki::pad::SetupScreen pad_setup(pad_actions, pref_path() + "pad_map.txt");
     auto present = [&](ki::Context& ctx) {
         SDL_RenderClear(renderer);
 #ifdef KI_HAVE_HD
@@ -368,11 +342,12 @@ int main(int argc, char** argv) {
             SDL_UpdateTexture(texture, nullptr, rgb.data(), 320 * 3);
             SDL_RenderCopy(renderer, texture, nullptr, nullptr);
         }
+        pad_setup.draw(renderer, pads);
         SDL_RenderPresent(renderer);
     };
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
         SDL_Event ev;
-        for (bool first = true; first || paused; first = false) {
+        for (bool first = true; first || paused || pad_setup.open(); first = false) {
             if (!first) {
                 // Paused: the frame stays on screen (H still switches HD, to compare), the game does not run.
                 present(ctx);
@@ -380,6 +355,14 @@ int main(int argc, char** argv) {
                 next_frame = std::chrono::steady_clock::now();
             }
             while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED || ev.type == SDL_QUIT) {
+                    // handled below even while the setup screen is open
+                } else if (pad_setup.handle(ev)) {
+                    continue;
+                } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_G) {
+                    pad_setup.toggle();
+                    continue;
+                }
                 if (ev.type == SDL_QUIT || (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) {
                     save();
                     SDL_Quit();
@@ -468,7 +451,7 @@ int main(int argc, char** argv) {
             if (keys[k.key]) (k.player == 1 ? p1 : p2) &= ~k.bit;
         int player = 0;
         for (SDL_GameController* pad : pads)
-            if (pad && SDL_GameControllerGetAttached(pad) && player < 2) (player++ == 0 ? p1 : p2) &= ~pad_bits(pad);
+            if (pad && SDL_GameControllerGetAttached(pad) && player < 2) (player++ == 0 ? p1 : p2) &= ~ki::pad::pressed(pad, pad_actions);
         board.p1 = p1;
         board.p2 = p2;
 
