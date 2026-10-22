@@ -81,6 +81,7 @@ const KeyBit kKeys[] = {
 
 constexpr double kFrameSeconds = 1.0 / (6.25e6 / (406.0 * 261.0));
 constexpr const char* kTitle = "Killer Instinct (recompiled)";
+constexpr int kWideW = 427;  // 240 * 16 / 9
 
 void write_ppm_file(const std::string& path, const std::vector<uint8_t>& rgb, int w, int h) {
     if (FILE* f = std::fopen(path.c_str(), "wb")) {
@@ -154,6 +155,7 @@ int main(int argc, char** argv) {
     g_argv = argv;
     std::string boot, disk, rom, sound_roms, data, hd_pack;
     static ki::FightChoice fight;
+    std::string aspect_arg;
     int scale = 3;
     bool mute = false;
     for (int i = 1; i < argc; ++i) {
@@ -168,6 +170,7 @@ int main(int argc, char** argv) {
         else if (k == "--sound-roms") sound_roms = v;
         else if (k == "--data") data = v;
         else if (k == "--hd-pack") hd_pack = v;
+        else if (k == "--aspect") aspect_arg = v;  // 16:9 or 4:3 (remembered; V switches while playing)
         else if (k == "--opponent" && !ki::parse_characters(v, fight.opponents)) {
             std::fprintf(stderr, "--opponent: names or numbers 0-10 (jago combo spinal thunder glacius fulgore cinder sabrewulf orchid riptor eyedol)\n");
             return 1;
@@ -184,7 +187,22 @@ int main(int argc, char** argv) {
     SDL_Window* window = SDL_CreateWindow(kTitle, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 320 * scale,
                                           240 * scale, SDL_WINDOW_RESIZABLE);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    SDL_RenderSetLogicalSize(renderer, 320, 240);
+    // 16:9: the 4:3 picture in the middle of a 427x240 view; the sides show a
+    // blurred, darkened copy of the picture ("ambient"). V switches, remembered.
+    bool wide = read_text(pref_path() + "aspect.txt") == "16:9";
+    if (!aspect_arg.empty()) wide = aspect_arg == "16:9";
+    auto set_aspect = [&](bool w) {
+        wide = w;
+        SDL_RenderSetLogicalSize(renderer, wide ? kWideW : 320, 240);
+        int ww = 0, wh = 0;
+        SDL_GetWindowSize(window, &ww, &wh);
+        if (!(SDL_GetWindowFlags(window) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED)))
+            SDL_SetWindowSize(window, wh * (wide ? kWideW : 320) / 240, wh);
+        write_text(pref_path() + "aspect.txt", wide ? "16:9" : "4:3");
+    };
+    set_aspect(wide);
+    SDL_Texture* ambient = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 40, 30);
+    SDL_SetTextureScaleMode(ambient, SDL_ScaleModeLinear);
     SDL_Texture* texture =
         SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 320, 240);
     SDL_Texture* hd_texture = nullptr;  // 4x picture when an HD pack is loaded (H toggles)
@@ -325,24 +343,76 @@ int main(int argc, char** argv) {
     static std::vector<ki::pad::Action> pad_actions = ki::pad::load_bindings(pref_path() + "pad_map.txt");
     static ki::pad::SetupScreen pad_setup(pad_actions, pref_path() + "pad_map.txt");
     auto present = [&](ki::Context& ctx) {
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
+        auto rgb = board.framebuffer_rgb(ctx);
+        const SDL_FRect game{wide ? (kWideW - 320) / 2.0f : 0.0f, 0.0f, 320.0f, 240.0f};
+        if (wide) {
+            // Ambient sides: the picture averaged down to 40x30, stretched over the
+            // whole view (the linear filter blurs it), then darkened.
+            std::vector<uint8_t> small(40 * 30 * 3);
+            for (int y = 0; y < 30; ++y)
+                for (int x = 0; x < 40; ++x)
+                    for (int ch = 0; ch < 3; ++ch) {
+                        int sum = 0;
+                        for (int yy = 0; yy < 8; ++yy)
+                            for (int xx = 0; xx < 8; ++xx) sum += rgb[((y * 8 + yy) * 320 + x * 8 + xx) * 3 + ch];
+                        small[(y * 40 + x) * 3 + ch] = static_cast<uint8_t>(sum / 64);
+                    }
+            SDL_UpdateTexture(ambient, nullptr, small.data(), 40 * 3);
+            // Each side continues the picture's outer columns (blurred by the
+            // linear filter), fading to dark towards the window's edge.
+            const SDL_Rect left_src{0, 0, 2, 30}, right_src{38, 0, 2, 30};
+            const SDL_FRect left_dst{0.0f, 0.0f, game.x, 240.0f}, right_dst{game.x + 320.0f, 0.0f, game.x, 240.0f};
+            SDL_RenderCopyF(renderer, ambient, &left_src, &left_dst);
+            SDL_RenderCopyF(renderer, ambient, &right_src, &right_dst);
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            const int side = static_cast<int>(game.x);
+            for (int x = 0; x < side; ++x) {
+                Uint8 a = static_cast<Uint8>(60 + 170 * (side - x) / side);  // darker away from the picture
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, a);
+                SDL_RenderDrawLine(renderer, x, 0, x, 239);
+                SDL_RenderDrawLine(renderer, kWideW - 1 - x, 0, kWideW - 1 - x, 239);
+            }
+        }
 #ifdef KI_HAVE_HD
         // The HD copy is kept up to date even when not shown, so H switches instantly.
         if (hd_texture) {
             const std::vector<uint32_t>& px = hd.frame(ctx, board.displayed_bank());
             if (hd_on) {
+                // 16:9 on stages drawn from a wide panorama: the real sky and
+                // buildings beyond the picture's edges, over the ambient fill.
+                static std::vector<uint32_t> left, right;
+                static SDL_Texture* side_tex[2] = {};
+                constexpr int kSide = 54;
+                if (wide && hd.sides(ctx, board.displayed_bank(), kSide, left, right)) {
+                    for (int i = 0; i < 2; ++i) {
+                        if (!side_tex[i]) {
+                            side_tex[i] = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                                                            kSide * ki::HdRenderer::kScale, ki::HdRenderer::kH);
+                            SDL_SetTextureBlendMode(side_tex[i], SDL_BLENDMODE_BLEND);
+                        }
+                        SDL_UpdateTexture(side_tex[i], nullptr, (i ? right : left).data(), kSide * ki::HdRenderer::kScale * 4);
+                    }
+                    const SDL_FRect l{game.x - kSide, 0.0f, static_cast<float>(kSide), 240.0f}, r{game.x + 320.0f, 0.0f, static_cast<float>(kSide), 240.0f};
+                    SDL_RenderCopyF(renderer, side_tex[0], nullptr, &l);
+                    SDL_RenderCopyF(renderer, side_tex[1], nullptr, &r);
+                }
                 SDL_UpdateTexture(hd_texture, nullptr, px.data(), ki::HdRenderer::kW * 4);
-                SDL_RenderCopy(renderer, hd_texture, nullptr, nullptr);
+                SDL_RenderCopyF(renderer, hd_texture, nullptr, &game);
             }
         }
         if (!hd_on)
 #endif
         {
-            auto rgb = board.framebuffer_rgb(ctx);
             SDL_UpdateTexture(texture, nullptr, rgb.data(), 320 * 3);
-            SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+            SDL_RenderCopyF(renderer, texture, nullptr, &game);
         }
+        // The setup screen is laid out for the 4:3 area.
+        SDL_Rect area{static_cast<int>(game.x), 0, 320, 240};
+        SDL_RenderSetViewport(renderer, &area);
         pad_setup.draw(renderer, pads);
+        SDL_RenderSetViewport(renderer, nullptr);
         SDL_RenderPresent(renderer);
     };
     board.on_vblank = [&](ki::Context& ctx, uint64_t frame) {
@@ -410,6 +480,7 @@ int main(int argc, char** argv) {
                     std::perror("reset");
                     std::exit(1);
                 }
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_V) set_aspect(!wide);
                 if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_P) {
                     paused = !paused;
                     if (audio) SDL_PauseAudioDevice(audio, paused ? 1 : 0);

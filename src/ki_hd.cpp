@@ -626,6 +626,11 @@ void HdRenderer::on_panorama_after(Context& c) {
     }
     // Synced first, so the pixels the copy changed are the only ones left.
     Bank& b = r.bank_of(bank);
+    {
+        auto& copies = r.pano_copies_[bank == 0x58000 ? 1 : 0];
+        if (r.pano_epoch_[bank == 0x58000 ? 1 : 0] != r.epoch_) copies.clear(), r.pano_epoch_[bank == 0x58000 ? 1 : 0] = r.epoch_;
+        copies.push_back({&p, row0, rows, ((col0 % w) + w) % w});
+    }
     const uint16_t* lo = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
     col0 = ((col0 % w) + w) % w;
     for (int row = 0; row < rows && row < p.h; ++row) {
@@ -909,6 +914,42 @@ void HdRenderer::put_saved_screen(const Context& c) {
     std::memcpy(b.shadow.data(), &c.sram[target], 320 * 240 * 2);
     std::fill(b.owned.begin(), b.owned.end(), 1);
     b.hd_rects.clear();
+}
+
+bool HdRenderer::sides(const Context& c, uint32_t bank, int side_px, std::vector<uint32_t>& left, std::vector<uint32_t>& right) {
+    const uint16_t* fb = reinterpret_cast<const uint16_t*>(&c.sram[bank]);
+    const int sw = side_px * kScale;
+    left.assign(static_cast<size_t>(sw) * kH, 0);
+    right.assign(static_cast<size_t>(sw) * kH, 0);
+    const auto& copies = pano_copies_[bank == 0x58000 ? 1 : 0];
+    bool any = false;
+    for (const PanoCopy& pc : copies) {
+        const Panorama& p = *pc.pano;
+        if (p.hd.empty()) continue;
+        const int pw = p.w * kScale;
+        for (int row = 0; row < pc.rows && row < p.h; ++row) {
+            int y = pc.row0 + row;
+            if (y < 0 || y >= 240) continue;
+            int shown = 0;
+            for (int x = 0; x < 320; ++x)
+                shown += fb[y * 320 + x] == p.original[static_cast<size_t>(row) * p.stride + 4 + (pc.col0 + x) % p.w];
+            if (shown < 160) continue;
+            for (int sy = 0; sy < kScale; ++sy) {
+                const uint32_t* src = &p.hd[static_cast<size_t>(row * kScale + sy) * pw];
+                uint32_t* l = &left[static_cast<size_t>(y * kScale + sy) * sw];
+                uint32_t* rr = &right[static_cast<size_t>(y * kScale + sy) * sw];
+                for (int x = 0; x < sw; ++x) {
+                    // Columns left of screen column 0 and right of 319, wrapping as the copy does.
+                    int lc = ((pc.col0 * kScale - sw + x) % pw + pw) % pw;
+                    int rc = ((pc.col0 + 320) * kScale + x) % pw;
+                    l[x] = src[lc] | 0xff000000u;
+                    rr[x] = src[rc] | 0xff000000u;
+                }
+            }
+            any = true;
+        }
+    }
+    return any;
 }
 
 const std::vector<uint32_t>& HdRenderer::frame(const Context& c, uint32_t bank) {

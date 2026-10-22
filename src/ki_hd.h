@@ -30,6 +30,12 @@ public:
     void detach();
     // The HD picture of a framebuffer (SRAM offset 0x30000 or 0x58000), ARGB8888, kW x kH.
     const std::vector<uint32_t>& frame(const Context& c, uint32_t bank);
+    // 16:9: what lies beyond the left and right edge of that picture, side_px
+    // original pixels wide each (side_px * kScale x kH, ARGB; alpha 0 where
+    // nothing is known). Filled from the stage panoramas copied this frame.
+    // Only rows where the panorama shows at least half of the picture's width
+    // are extended (not those the floor or the HUD cover).
+    bool sides(const Context& c, uint32_t bank, int side_px, std::vector<uint32_t>& left, std::vector<uint32_t>& right);
     unsigned hd_sprites_drawn() const { return hd_drawn_; }
     // Blitter calls with no HD image, per header and mode (to find what a pack misses).
     void print_misses(FILE* f) const;
@@ -117,6 +123,12 @@ private:
     static void on_panorama_after(Context& c);
     bool load_panorama(Panorama& p);
     std::unordered_map<uint64_t, Panorama> panoramas_;  // key: FNV of the first row
+    struct PanoCopy {
+        const Panorama* pano;
+        int row0, rows, col0;
+    };
+    std::vector<PanoCopy> pano_copies_[2];  // per framebuffer, this frame's panorama copies
+    uint64_t pano_epoch_[2] = {~0ull, ~0ull};
     uint32_t pano_regs_[6] = {};                      // v0 v1 a0 a1 a2 a3 at the copy's entry
     static void on_before(Context& c);
     static void on_after(Context& c);

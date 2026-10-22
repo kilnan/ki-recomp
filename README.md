@@ -229,6 +229,7 @@ rebind any input; bindings are saved in `pad_map.txt` in the preferences folder)
 | key | action |
 |---|---|
 | G | controller setup: connected pads, live test, rebind every input (saved) |
+| V | 16:9 / 4:3 (remembered; also `--aspect 16:9`): the sides continue the picture's edges, and on stages drawn from a wide panorama (6, 7, 8) show the real background, in HD |
 | P | pause (H still works, to compare) |
 | R | reset (restarts like switching the board off and on) |
 | F6 / F7 | opponent / stage of the next fight: the game's, then each in turn (title bar; on a Mac keyboard hold Fn) |

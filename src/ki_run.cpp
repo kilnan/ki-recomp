@@ -208,6 +208,26 @@ int main(int argc, char** argv) {
 #ifdef KI_HAVE_HD
             if (!hd_pack.empty()) {
                 const std::vector<uint32_t>& px = hd.frame(ctx, board.displayed_bank());
+                if (std::getenv("KI_WIDE")) {  // also a 16:9 picture: panorama sides where known, black elsewhere
+                    std::vector<uint32_t> l, r;
+                    constexpr int side = 54, sw = side * ki::HdRenderer::kScale, W = ki::HdRenderer::kW + 2 * sw;
+                    hd.sides(ctx, board.displayed_bank(), side, l, r);
+                    std::vector<uint8_t> rgbw(static_cast<size_t>(W) * ki::HdRenderer::kH * 3);
+                    for (int y = 0; y < ki::HdRenderer::kH; ++y)
+                        for (int x = 0; x < W; ++x) {
+                            uint32_t v = x < sw ? l[y * sw + x] : x >= sw + ki::HdRenderer::kW ? r[y * sw + x - sw - ki::HdRenderer::kW]
+                                                                                              : px[y * ki::HdRenderer::kW + x - sw];
+                            uint8_t* o = &rgbw[(static_cast<size_t>(y) * W + x) * 3];
+                            o[0] = v >> 16, o[1] = v >> 8, o[2] = v;
+                        }
+                    char wn[64];
+                    std::snprintf(wn, sizeof wn, "/hd_wide_%05llu.ppm", static_cast<unsigned long long>(frame));
+                    if (FILE* f = std::fopen((out + wn).c_str(), "wb")) {
+                        std::fprintf(f, "P6\n%d %d\n255\n", W, ki::HdRenderer::kH);
+                        std::fwrite(rgbw.data(), 1, rgbw.size(), f);
+                        std::fclose(f);
+                    }
+                }
                 std::snprintf(name, sizeof name, "/hd_frame_%05llu.ppm", static_cast<unsigned long long>(frame));
                 if (FILE* f = std::fopen((out + name).c_str(), "wb")) {
                     std::fprintf(f, "P6\n%d %d\n255\n", ki::HdRenderer::kW, ki::HdRenderer::kH);
@@ -349,6 +369,16 @@ int main(int argc, char** argv) {
     if (dcs) state.bind(board, dcs.get(), ki::read_sound_roms_or_die(sound_roms));
     else state.bind(board, nullptr, {});
     if (!sprite_dir.empty()) ki::start_sprite_extraction(sprite_dir);
+    // KI_LOG_DRAWS=FILE: every normal (mode 0) sprite draw, "frame header x y t4" (animation timing studies).
+    if (const char* draws = std::getenv("KI_LOG_DRAWS")) {
+        static FILE* f = std::fopen(draws, "w");
+        ki::hooks::sprite = [](ki::Context& g) {
+            if (ki::lo32(g.r[22]) != 0 || !f) return;
+            std::fprintf(f, "%llu %08x %d %d %d\n", static_cast<unsigned long long>(board_frame), ki::lo32(g.r[3]),
+                         static_cast<int32_t>(ki::lo32(g.r[23])) / 256, static_cast<int32_t>(ki::lo32(g.r[24])) / 256,
+                         static_cast<int32_t>(ki::lo32(g.r[12])));
+        };
+    }
     if (!fight.opponents.empty() || !fight.stages.empty()) ki::install_fight_choice(&fight);
 #ifdef KI_MEM_PROBE
     // KI_MEM_PROBE=LO-HI[:FRAME]: accesses made by code in [LO, HI), per 1 KB page of address, during FRAME.

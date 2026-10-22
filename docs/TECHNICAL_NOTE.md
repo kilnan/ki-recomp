@@ -825,6 +825,11 @@ there too; with 256 bytes there are 476 keys.
 - **Keys.** The key is the FNV hash of the layer's first row.
 - **Invalidation.** The areas HD sprites were drawn on are invalidated at the next draw into that framebuffer, so a pixel redrawn with its old value cannot keep a stale HD image.
 
+**16:9** (`ki_play --aspect 16:9`, V).
+- **Layout.** The game still draws 320×240; the view is 427×240 with the picture in the middle.
+- **Generic sides.** They continue the picture's two outer columns, averaged to 40×30 and stretched with linear filtering, then fade to dark.
+- **Panorama stages.** On stages whose background is a panorama copy (0x88018c98), `HdRenderer::sides()` takes the columns left of screen column 0 and right of 319 from the HD panorama, wrapping as the copy does. It does this only for rows where the panorama shows across at least half of the picture, which excludes the floor and the HUD. Sprites are clipped by the game at the 320 edge and are not extended.
+
 ## 8. Open questions
 
 1. Code from the disk: none in 15 minutes of scripted play [O]. Still untested:
